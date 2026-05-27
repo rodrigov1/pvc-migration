@@ -1185,15 +1185,12 @@ validate() {
 	echo "    Capacity: ${new_pvc_size:--}"
 	echo ""
 
-	# Size comparison
+	# Size comparison — always recompute new size since copy-data may have run
 	local old_size_bytes new_size_bytes
 	old_size_bytes=$(state_get "$context" "$namespace" "$app" "OLD_TOTAL_SIZE" || true)
-	new_size_bytes=$(state_get "$context" "$namespace" "$app" "NEW_TOTAL_SIZE" || true)
-	if [[ -z "$new_size_bytes" || "$new_size_bytes" == "0" ]]; then
-		new_size_bytes=$(compute_total_size_nfs "$(state_get "$context" "$namespace" "$app" "NEW_NFS_HOST" || true)" \
-			"$(state_get "$context" "$namespace" "$app" "NFS_PATH_NEW" || true)")
-		state_set "$context" "$namespace" "$app" "NEW_TOTAL_SIZE" "$new_size_bytes"
-	fi
+	new_size_bytes=$(compute_total_size_nfs "$(state_get "$context" "$namespace" "$app" "NEW_NFS_HOST" || true)" \
+		"$(state_get "$context" "$namespace" "$app" "NFS_PATH_NEW" || true)")
+	state_set "$context" "$namespace" "$app" "NEW_TOTAL_SIZE" "$new_size_bytes"
 	if [[ -n "$old_size_bytes" && "$old_size_bytes" != "0" ]]; then
 		echo "  Data size (old): $(human_size "$old_size_bytes")"
 	fi
