@@ -43,9 +43,10 @@ Subcommands:
     Discover and capture new-side PVC/PV/NFS state after chart impact.
     --deploy is needed if the new deployment name differs from the old one.
 
-  copy-data <context> <namespace> <migration-id> [--backup]
-    Copy data from old NFS path to new NFS path.
-    Scales down deployments, copies via tar-pipe over SSH, verifies.
+  copy-data <context> <namespace> <migration-id> [--backup] [--compress]
+    Copy data from old NFS path to new NFS path via tar-pipe over SSH.
+    No compression by default (faster for large data). Add --compress for slow links.
+    Shows progress via pv if available.
 
   validate <context> <namespace> <migration-id>
     Scale up the new deployment, wait for readiness, verify files inside the pod.
@@ -773,7 +774,7 @@ discover_new() {
 # SUBCOMMAND: copy-data
 # ======================================================================
 copy_data() {
-	local context="" namespace="" migration_id="" do_backup=false
+	local context="" namespace="" migration_id="" do_backup=false use_compress=false
 
 	context="$1"
 	shift || true
@@ -788,6 +789,10 @@ copy_data() {
 			do_backup=true
 			shift
 			;;
+		--compress)
+			use_compress=true
+			shift
+			;;
 		*)
 			log_error "Unknown option: $1"
 			usage
@@ -796,7 +801,7 @@ copy_data() {
 	done
 
 	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME copy-data [--backup] <context> <namespace> <migration-id>"
+		log_error "Usage: $SCRIPT_NAME copy-data [--backup] [--compress] <context> <namespace> <migration-id>"
 		exit 1
 	fi
 
@@ -948,15 +953,31 @@ copy_data() {
 		exit 1
 	}
 
+	# Build tar flags (no compress by default)
+	local tar_flags="-cf -"
+	local tar_extract="-xf -"
+	local copy_label="tar-pipe (no compression)"
+	if $use_compress; then
+		tar_flags="-czf -"
+		tar_extract="-xzf -"
+		copy_label="tar-pipe (gzip compressed)"
+	fi
+
+	# Build progress pipe
+	local progress_cmd="cat"
+	if command -v pv &>/dev/null; then
+		progress_cmd="pv -trab"
+	fi
+
 	# Copy data
 	echo ""
 	log_info "Starting data copy from $nfs_host_old to $nfs_host_new ..."
-	log_info "Command: tar-pipe via SSH"
+	log_info "Command: $copy_label, progress: $([ "$progress_cmd" = "cat" ] && echo "no pv" || echo "pv")"
 
 	if ! confirm "Execute the copy now?"; then
 		log_info "Aborted. NFS paths are still scaled down."
 		log_info "Manual copy command:"
-		echo "  ssh $nfs_host_old \"tar -czf - -C '$nfs_path_old' .\" | ssh $nfs_host_new \"tar -xzf - -C '$nfs_path_new'\""
+		echo "  ssh $nfs_host_old \"tar $tar_flags -C '$nfs_path_old' .\" | $progress_cmd | ssh $nfs_host_new \"tar $tar_extract -C '$nfs_path_new'\""
 		return
 	fi
 
@@ -964,7 +985,7 @@ copy_data() {
 	start_time=$(date +%s)
 
 	# Copy via tar-pipe
-	if ! ssh "$nfs_host_old" "tar -czf - -C '$nfs_path_old' ." | ssh "$nfs_host_new" "tar -xzf - -C '$nfs_path_new'"; then
+	if ! ssh "$nfs_host_old" "tar $tar_flags -C '$nfs_path_old' ." | $progress_cmd | ssh "$nfs_host_new" "tar $tar_extract -C '$nfs_path_new'"; then
 		log_error "Data copy failed!"
 		log_error "Check SSH connectivity and NFS paths."
 		log_error "Old: ssh $nfs_host_old ls -lah '$nfs_path_old'"
