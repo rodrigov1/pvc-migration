@@ -36,35 +36,34 @@ usage() {
 Usage: $SCRIPT_NAME <subcommand> [options]
 
 Subcommands:
-  discover-old <context> <namespace> <app-name> [--deploy <old-deploy>] [--pvc <old-pvc>]
+  discover-old <context> <namespace> <migration-id> --deploy <deploy> --pvc <pvc>
     Discover and capture old-side PVC/PV/NFS state from the cluster.
-    If --deploy and --pvc are omitted, the script auto-discovers by app-name pattern.
 
-  discover-new <context> <namespace> <app-name>
+  discover-new <context> <namespace> <migration-id> [--deploy <deploy>] [--pvc <pvc>]
     Discover and capture new-side PVC/PV/NFS state after chart impact.
+    --deploy is needed if the new deployment name differs from the old one.
 
-  copy-data <context> <namespace> <app-name> [--backup]
+  copy-data <context> <namespace> <migration-id> [--backup]
     Copy data from old NFS path to new NFS path.
-    Scales down both deployments, copies via tar-pipe over SSH, verifies.
-    --backup creates a tarball of the old data before copying.
+    Scales down deployments, copies via tar-pipe over SSH, verifies.
 
-  validate <context> <namespace> <app-name>
+  validate <context> <namespace> <migration-id>
     Scale up the new deployment, wait for readiness, verify files inside the pod.
 
-  cleanup <context> <namespace> <app-name>
+  cleanup <context> <namespace> <migration-id>
     Remove old deployment and notify about old PVC retention.
 
-  status <context> <namespace> <app-name>
+  status <context> <namespace> <migration-id>
     Show current state file contents.
 
-State files are stored in: $STATE_BASE/<context>/<namespace>/<app-name>.env
+State files: \$STATE_BASE/<context>/<namespace>/<migration-id>.env
 
 Examples:
-  $SCRIPT_NAME discover-old prod n8n redis-famaf --deploy n8n-redis-famaf --pvc n8n-redis-famaf-deployment-pvc
-  $SCRIPT_NAME discover-new prod n8n redis-famaf
-  $SCRIPT_NAME copy-data prod n8n redis-famaf --backup
-  $SCRIPT_NAME validate prod n8n redis-famaf
-  $SCRIPT_NAME cleanup prod n8n redis-famaf
+  \$SCRIPT_NAME discover-old prod n8n redis-famaf --deploy n8n-redis-famaf --pvc n8n-redis-famaf-deployment-pvc
+  \$SCRIPT_NAME discover-new prod n8n redis-famaf --deploy redis-famaf
+  \$SCRIPT_NAME copy-data prod n8n redis-famaf --backup
+  \$SCRIPT_NAME validate prod n8n redis-famaf
+  \$SCRIPT_NAME cleanup prod n8n redis-famaf
 EOF
 	exit 1
 }
@@ -307,13 +306,13 @@ capture_file_manifest_nfs() {
 # SUBCOMMAND: discover-old
 # ======================================================================
 discover_old() {
-	local context="" namespace="" app="" deploy_old="" pvc_old=""
+	local context="" namespace="" migration_id="" deploy_old="" pvc_old=""
 
 	context="$1"
 	shift || true
 	namespace="$1"
 	shift || true
-	app="$1"
+	migration_id="$1"
 	shift || true
 
 	while [[ $# -gt 0 ]]; do
@@ -333,61 +332,31 @@ discover_old() {
 		esac
 	done
 
-	if [[ -z "$context" || -z "$namespace" || -z "$app" ]]; then
-		log_error "Usage: $SCRIPT_NAME discover-old <context> <namespace> <app-name> [--deploy <deploy>] [--pvc <pvc>]"
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME discover-old <context> <namespace> <migration-id> --deploy <deploy> --pvc <pvc>"
 		exit 1
+	fi
+
+	if [[ -z "$deploy_old" ]]; then
+		log_error "--deploy is required. Specify the old deployment name."
+		usage
+	fi
+	if [[ -z "$pvc_old" ]]; then
+		log_error "--pvc is required. Specify the old PVC name."
+		usage
 	fi
 
 	# Check existing state
 	local existing_phase
-	existing_phase=$(state_get "$context" "$namespace" "$app" "PHASE" || true)
+	existing_phase=$(state_get "$context" "$namespace" "$migration_id" "PHASE" || true)
 	local existing_deploy
-	existing_deploy=$(state_get "$context" "$namespace" "$app" "DEPLOY_OLD" || true)
+	existing_deploy=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD" || true)
 	if [[ -n "$existing_phase" && -n "$existing_deploy" ]]; then
 		log_info "Existing state found (phase=$existing_phase). Add --force to re-discover."
 		if ! confirm "Re-discover old state?"; then
 			log_info "Aborted."
 			return
 		fi
-	fi
-
-	# Auto-discover resources if not specified
-	if [[ -z "$deploy_old" ]]; then
-		local matches
-		matches=$(get_deployments_by_pattern "$context" "$namespace" "$app")
-		if [[ -z "$matches" ]]; then
-			log_error "No deployments found matching '$app' in $context/$namespace"
-			log_error "Specify --deploy manually."
-			exit 1
-		fi
-		local count
-		count=$(echo "$matches" | wc -l)
-		if [[ "$count" -gt 1 ]]; then
-			log_warn "Multiple deployments match '$app':"
-			echo "$matches"
-			log_info "Using first match: $(echo "$matches" | head -1)"
-		fi
-		deploy_old=$(echo "$matches" | head -1)
-		log_info "Auto-discovered deployment: $deploy_old"
-	fi
-
-	if [[ -z "$pvc_old" ]]; then
-		local matches
-		matches=$(get_pvcs_by_pattern "$context" "$namespace" "$app")
-		if [[ -z "$matches" ]]; then
-			log_error "No PVCs found matching '$app' in $context/$namespace"
-			log_error "Specify --pvc manually."
-			exit 1
-		fi
-		local count
-		count=$(echo "$matches" | wc -l)
-		if [[ "$count" -gt 1 ]]; then
-			log_warn "Multiple PVCs match '$app':"
-			echo "$matches"
-			log_info "Using first match: $(echo "$matches" | head -1)"
-		fi
-		pvc_old=$(echo "$matches" | head -1)
-		log_info "Auto-discovered PVC: $pvc_old"
 	fi
 
 	# Sanity check: detect if PVC looks like 4.3.2 naming (means chart was already synced)
@@ -437,14 +406,14 @@ discover_old() {
 	fi
 
 	# Write basic info to state
-	state_set "$context" "$namespace" "$app" "PHASE" "discovered-old"
-	state_set "$context" "$namespace" "$app" "CONTEXT" "$context"
-	state_set "$context" "$namespace" "$app" "NAMESPACE" "$namespace"
-	state_set "$context" "$namespace" "$app" "APP" "$app"
-	state_set "$context" "$namespace" "$app" "DEPLOY_OLD" "$deploy_old"
-	state_set "$context" "$namespace" "$app" "PVC_OLD" "$pvc_old"
-	state_set "$context" "$namespace" "$app" "PV_OLD" "$pv_old"
-	state_set "$context" "$namespace" "$app" "VOLUME_HANDLE_OLD" "$volume_handle_old"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "discovered-old"
+	state_set "$context" "$namespace" "$migration_id" "CONTEXT" "$context"
+	state_set "$context" "$namespace" "$migration_id" "NAMESPACE" "$namespace"
+	state_set "$context" "$namespace" "$migration_id" "APP" "$migration_id"
+	state_set "$context" "$namespace" "$migration_id" "DEPLOY_OLD" "$deploy_old"
+	state_set "$context" "$namespace" "$migration_id" "PVC_OLD" "$pvc_old"
+	state_set "$context" "$namespace" "$migration_id" "PV_OLD" "$pv_old"
+	state_set "$context" "$namespace" "$migration_id" "VOLUME_HANDLE_OLD" "$volume_handle_old"
 
 	# Parse volumeHandle to extract NFS info
 	if [[ -n "$volume_handle_old" ]]; then
@@ -452,7 +421,7 @@ discover_old() {
 		parsed=$(parse_volume_handle "$volume_handle_old" "OLD") || true
 		if [[ -n "$parsed" ]]; then
 			echo "$parsed" | while IFS='=' read -r key value; do
-				state_set "$context" "$namespace" "$app" "$key" "$value"
+				state_set "$context" "$namespace" "$migration_id" "$key" "$value"
 			done
 		fi
 	fi
@@ -462,7 +431,7 @@ discover_old() {
 	nfs_direct=$(get_nfs_from_pv "$context" "$pv_old") || true
 	if [[ -n "$nfs_direct" ]]; then
 		echo "$nfs_direct" | while IFS='=' read -r key value; do
-			state_set "$context" "$namespace" "$app" "OLD_${key}" "$value"
+			state_set "$context" "$namespace" "$migration_id" "OLD_${key}" "$value"
 		done
 	fi
 
@@ -492,18 +461,18 @@ discover_old() {
 				log_info "Mount path: $mount_path"
 				log_info "SubPath: ${subpath:-<none>}"
 
-				state_set "$context" "$namespace" "$app" "MOUNT_OLD" "$mount_path"
-				state_set "$context" "$namespace" "$app" "SUBPATH_OLD" "${subpath:-}"
+				state_set "$context" "$namespace" "$migration_id" "MOUNT_OLD" "$mount_path"
+				state_set "$context" "$namespace" "$migration_id" "SUBPATH_OLD" "${subpath:-}"
 			fi
 		fi
 	fi
 
 	# Build the NFS path
 	local nfs_host nfs_share_base pv_uid subpath_val nfs_path_old
-	nfs_host=$(state_get "$context" "$namespace" "$app" "OLD_NFS_HOST" || true)
-	nfs_share_base=$(state_get "$context" "$namespace" "$app" "OLD_NFS_SHARE_BASE" || true)
-	pv_uid=$(state_get "$context" "$namespace" "$app" "OLD_PV_UID" || true)
-	subpath_val=$(state_get "$context" "$namespace" "$app" "SUBPATH_OLD" || true)
+	nfs_host=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST" || true)
+	nfs_share_base=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_SHARE_BASE" || true)
+	pv_uid=$(state_get "$context" "$namespace" "$migration_id" "OLD_PV_UID" || true)
+	subpath_val=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
 
 	if [[ -n "$nfs_host" && -n "$nfs_share_base" && -n "$pv_uid" ]]; then
 		if [[ -n "$subpath_val" ]]; then
@@ -511,7 +480,7 @@ discover_old() {
 		else
 			nfs_path_old="${nfs_share_base}/${pv_uid}/"
 		fi
-		state_set "$context" "$namespace" "$app" "NFS_PATH_OLD" "$nfs_path_old"
+		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_OLD" "$nfs_path_old"
 		log_ok "Old NFS path: $nfs_host:$nfs_path_old"
 	else
 		log_warn "Could not construct NFS path. Set NFS_PATH_OLD manually."
@@ -524,7 +493,7 @@ discover_old() {
 	# Capture file manifest via NFS (preferred) or from running pod (fallback)
 	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]]; then
 		local manifest_file
-		manifest_file="$STATE_BASE/$context/$namespace/${app}.old.manifest"
+		manifest_file="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
 		if ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
 			capture_file_manifest_nfs "$nfs_host" "$nfs_path_old" "$manifest_file" || true
 		else
@@ -534,9 +503,9 @@ discover_old() {
 	# Fallback: capture manifest from running pod
 	if [[ ! -f "$manifest_file" ]]; then
 		local manifest_file
-		manifest_file="$STATE_BASE/$context/$namespace/${app}.old.manifest"
+		manifest_file="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
 		local pod_name mount_path
-		mount_path=$(state_get "$context" "$namespace" "$app" "MOUNT_OLD" || true)
+		mount_path=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
 		pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
 		if [[ -n "$pod_name" && -n "$mount_path" ]]; then
 			capture_file_manifest "$context" "$namespace" "$pod_name" "$mount_path" "$manifest_file" || true
@@ -552,106 +521,146 @@ discover_old() {
 	else
 		old_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_old")
 	fi
-	state_set "$context" "$namespace" "$app" "OLD_TOTAL_SIZE" "$old_total_bytes"
+	state_set "$context" "$namespace" "$migration_id" "OLD_TOTAL_SIZE" "$old_total_bytes"
 	log_info "Old data size: $(human_size "$old_total_bytes")"
 
-	log_ok "discover-old complete for $app in $context/$namespace"
-	log_info "State file: $(state_file_path "$context" "$namespace" "$app")"
+	log_ok "discover-old complete for $migration_id in $context/$namespace"
+	log_info "State file: $(state_file_path "$context" "$namespace" "$migration_id")"
 	echo ""
 	echo "===== Next steps ====="
 	echo "1. Review the state file and correct any values if needed."
 	echo "2. Apply the new chart (4.3.2) to the cluster."
-	echo "3. Run: $SCRIPT_NAME discover-new $context $namespace $app"
+	echo "3. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
 }
 
 # ======================================================================
 # SUBCOMMAND: discover-new
 # ======================================================================
 discover_new() {
-	local context="$1" namespace="$2" app="$3"
+	local context="" namespace="" migration_id="" deploy_new="" pvc_new=""
 
-	if [[ -z "$context" || -z "$namespace" || -z "$app" ]]; then
-		log_error "Usage: $SCRIPT_NAME discover-new <context> <namespace> <app-name>"
+	context="$1"
+	shift || true
+	namespace="$1"
+	shift || true
+	migration_id="$1"
+	shift || true
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--deploy)
+			deploy_new="$2"
+			shift 2
+			;;
+		--pvc)
+			pvc_new="$2"
+			shift 2
+			;;
+		*)
+			log_error "Unknown option: $1"
+			usage
+			;;
+		esac
+	done
+
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME discover-new <context> <namespace> <migration-id> [--deploy <deploy>] [--pvc <pvc>]"
 		exit 1
 	fi
 
-	state_require "$context" "$namespace" "$app"
+	state_require "$context" "$namespace" "$migration_id"
 
-	# Discover new deployment (should match the new chart naming)
-	local deploy_new=""
-	local matches
-	matches=$(get_deployments_by_pattern "$context" "$namespace" "$app")
-	if [[ -z "$matches" ]]; then
-		log_error "No deployments found matching '$app' in $context/$namespace"
-		log_error "Has the new chart been synced?"
-		exit 1
-	fi
-	local count
-	count=$(echo "$matches" | wc -l)
-	if [[ "$count" -gt 1 ]]; then
-		# Exclude the old deployment if it still exists
-		local deploy_old
-		deploy_old=$(state_get "$context" "$namespace" "$app" "DEPLOY_OLD" || true)
-		local filtered=""
-		if [[ -n "$deploy_old" ]]; then
-			filtered=$(echo "$matches" | grep -v "^${deploy_old}$" || true)
+	# Discover new deployment
+	if [[ -z "$deploy_new" ]]; then
+		local matches
+		matches=$(get_deployments_by_pattern "$context" "$namespace" "$migration_id")
+		if [[ -z "$matches" ]]; then
+			log_error "No deployments found matching '$migration_id' in $context/$namespace"
+			log_info "Available deployments:"
+			kubectl get deployments -n "$namespace" --context="$context" \
+				-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+				while IFS= read -r d; do echo "  - $d"; done
+			log_error "Re-run with --deploy <name> to specify the correct deployment."
+			exit 1
 		fi
-		if [[ -n "$filtered" ]]; then
-			count=$(echo "$filtered" | wc -l)
-			if [[ "$count" -eq 1 ]]; then
-				deploy_new="$filtered"
+		local count
+		count=$(echo "$matches" | wc -l)
+		if [[ "$count" -gt 1 ]]; then
+			local deploy_old
+			deploy_old=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD" || true)
+			local filtered=""
+			if [[ -n "$deploy_old" ]]; then
+				filtered=$(echo "$matches" | grep -v "^${deploy_old}$" || true)
+			fi
+			if [[ -n "$filtered" ]]; then
+				count=$(echo "$filtered" | wc -l)
+				if [[ "$count" -eq 1 ]]; then
+					deploy_new="$filtered"
+				else
+					log_warn "Multiple deployments match '$migration_id':"
+					echo "$filtered"
+					deploy_new=$(echo "$filtered" | head -1)
+					log_info "Using first match: $deploy_new"
+				fi
 			else
-				log_warn "Multiple new deployments match '$app':"
-				echo "$filtered"
-				deploy_new=$(echo "$filtered" | head -1)
+				log_warn "Multiple deployments match '$migration_id':"
+				echo "$matches"
+				deploy_new=$(echo "$matches" | head -1)
 				log_info "Using first match: $deploy_new"
 			fi
 		else
-			log_warn "Multiple deployments match '$app':"
-			echo "$matches"
-			deploy_new=$(echo "$matches" | head -1)
-			log_info "Using first match: $deploy_new"
+			deploy_new="$matches"
 		fi
+		log_info "Found new deployment: $deploy_new"
 	else
-		deploy_new="$matches"
+		log_info "Using specified deployment: $deploy_new"
 	fi
-	log_info "Found new deployment: $deploy_new"
 
 	# Discover new PVC
-	local pvc_new=""
-	matches=$(get_pvcs_by_pattern "$context" "$namespace" "$app")
-	if [[ -z "$matches" ]]; then
-		log_error "No PVCs found matching '$app' in $context/$namespace"
-		exit 1
-	fi
-	count=$(echo "$matches" | wc -l)
-	if [[ "$count" -gt 1 ]]; then
-		local pvc_old
-		pvc_old=$(state_get "$context" "$namespace" "$app" "PVC_OLD" || true)
-		local filtered=""
-		if [[ -n "$pvc_old" ]]; then
-			filtered=$(echo "$matches" | grep -v "^${pvc_old}$" || true)
+	if [[ -z "$pvc_new" ]]; then
+		local matches
+		matches=$(get_pvcs_by_pattern "$context" "$namespace" "$migration_id")
+		if [[ -z "$matches" ]]; then
+			log_error "No PVCs found matching '$migration_id' in $context/$namespace"
+			log_info "Available PVCs:"
+			kubectl get pvc -n "$namespace" --context="$context" \
+				-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+				while IFS= read -r p; do echo "  - $p"; done
+			log_error "Re-run with --pvc <name> to specify the correct PVC."
+			exit 1
 		fi
-		if [[ -n "$filtered" ]]; then
-			count=$(echo "$filtered" | wc -l)
-			if [[ "$count" -eq 1 ]]; then
-				pvc_new="$filtered"
+		local count
+		count=$(echo "$matches" | wc -l)
+		if [[ "$count" -gt 1 ]]; then
+			local pvc_old
+			pvc_old=$(state_get "$context" "$namespace" "$migration_id" "PVC_OLD" || true)
+			local filtered=""
+			if [[ -n "$pvc_old" ]]; then
+				filtered=$(echo "$matches" | grep -v "^${pvc_old}$" || true)
+			fi
+			if [[ -n "$filtered" ]]; then
+				count=$(echo "$filtered" | wc -l)
+				if [[ "$count" -eq 1 ]]; then
+					pvc_new="$filtered"
+				else
+					log_warn "Multiple PVCs match '$migration_id':"
+					echo "$filtered"
+					pvc_new=$(echo "$filtered" | head -1)
+					log_info "Using first match: $pvc_new"
+				fi
 			else
-				log_warn "Multiple new PVCs match '$app':"
-				echo "$filtered"
-				pvc_new=$(echo "$filtered" | head -1)
+				log_warn "Multiple PVCs match '$migration_id':"
+				echo "$matches"
+				pvc_new=$(echo "$matches" | head -1)
 				log_info "Using first match: $pvc_new"
 			fi
 		else
-			log_warn "Multiple PVCs match '$app':"
-			echo "$matches"
-			pvc_new=$(echo "$matches" | head -1)
-			log_info "Using first match: $pvc_new"
+			pvc_new="$matches"
 		fi
+		log_info "Found new PVC: $pvc_new"
 	else
-		pvc_new="$matches"
+		log_info "Using specified PVC: $pvc_new"
 	fi
-	log_info "Found new PVC: $pvc_new"
 
 	# Get PV
 	local pv_new
@@ -673,11 +682,11 @@ discover_new() {
 	fi
 
 	# Write to state
-	state_set "$context" "$namespace" "$app" "PHASE" "discovered-new"
-	state_set "$context" "$namespace" "$app" "DEPLOY_NEW" "$deploy_new"
-	state_set "$context" "$namespace" "$app" "PVC_NEW" "$pvc_new"
-	state_set "$context" "$namespace" "$app" "PV_NEW" "$pv_new"
-	state_set "$context" "$namespace" "$app" "VOLUME_HANDLE_NEW" "$volume_handle_new"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "discovered-new"
+	state_set "$context" "$namespace" "$migration_id" "DEPLOY_NEW" "$deploy_new"
+	state_set "$context" "$namespace" "$migration_id" "PVC_NEW" "$pvc_new"
+	state_set "$context" "$namespace" "$migration_id" "PV_NEW" "$pv_new"
+	state_set "$context" "$namespace" "$migration_id" "VOLUME_HANDLE_NEW" "$volume_handle_new"
 
 	# Parse volumeHandle
 	if [[ -n "$volume_handle_new" ]]; then
@@ -685,7 +694,7 @@ discover_new() {
 		parsed=$(parse_volume_handle "$volume_handle_new" "NEW") || true
 		if [[ -n "$parsed" ]]; then
 			echo "$parsed" | while IFS='=' read -r key value; do
-				state_set "$context" "$namespace" "$app" "$key" "$value"
+				state_set "$context" "$namespace" "$migration_id" "$key" "$value"
 			done
 		fi
 	fi
@@ -704,17 +713,17 @@ discover_new() {
 			subpath=$(echo "$mount_info" | cut -d'|' -f2)
 			log_info "New mount path: $mount_path"
 			log_info "New SubPath: ${subpath:-<none>}"
-			state_set "$context" "$namespace" "$app" "MOUNT_NEW" "$mount_path"
-			state_set "$context" "$namespace" "$app" "SUBPATH_NEW" "${subpath:-}"
+			state_set "$context" "$namespace" "$migration_id" "MOUNT_NEW" "$mount_path"
+			state_set "$context" "$namespace" "$migration_id" "SUBPATH_NEW" "${subpath:-}"
 		fi
 	fi
 
 	# Build NFS path
 	local nfs_host nfs_share_base pv_uid nfs_path_new
-	nfs_host=$(state_get "$context" "$namespace" "$app" "NEW_NFS_HOST" || true)
-	nfs_share_base=$(state_get "$context" "$namespace" "$app" "NEW_NFS_SHARE_BASE" || true)
-	pv_uid=$(state_get "$context" "$namespace" "$app" "NEW_PV_UID" || true)
-	subpath=$(state_get "$context" "$namespace" "$app" "SUBPATH_NEW" || true)
+	nfs_host=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_HOST" || true)
+	nfs_share_base=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_SHARE_BASE" || true)
+	pv_uid=$(state_get "$context" "$namespace" "$migration_id" "NEW_PV_UID" || true)
+	subpath=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
 
 	if [[ -n "$nfs_host" && -n "$nfs_share_base" && -n "$pv_uid" ]]; then
 		if [[ -n "$subpath" ]]; then
@@ -722,7 +731,7 @@ discover_new() {
 		else
 			nfs_path_new="${nfs_share_base}/${pv_uid}/"
 		fi
-		state_set "$context" "$namespace" "$app" "NFS_PATH_NEW" "$nfs_path_new"
+		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_NEW" "$nfs_path_new"
 		log_ok "New NFS path: $nfs_host:$nfs_path_new"
 	else
 		log_warn "Could not construct new NFS path. Set NFS_PATH_NEW manually."
@@ -730,8 +739,8 @@ discover_new() {
 
 	# Check if old and new NFS backends differ
 	local nfs_host_old nfs_path_old
-	nfs_host_old=$(state_get "$context" "$namespace" "$app" "OLD_NFS_HOST" || true)
-	nfs_path_old=$(state_get "$context" "$namespace" "$app" "NFS_PATH_OLD" || true)
+	nfs_host_old=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST" || true)
+	nfs_path_old=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_OLD" || true)
 	if [[ -n "$nfs_host" && -n "$nfs_host_old" && "$nfs_host" != "$nfs_host_old" ]]; then
 		log_warn "NFS host changed: $nfs_host_old -> $nfs_host"
 		log_warn "Cross-host copy will be required."
@@ -746,31 +755,31 @@ discover_new() {
 			# Compute size if path already has data
 			local new_total_bytes
 			new_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_new")
-			state_set "$context" "$namespace" "$app" "NEW_TOTAL_SIZE" "$new_total_bytes"
+			state_set "$context" "$namespace" "$migration_id" "NEW_TOTAL_SIZE" "$new_total_bytes"
 			log_info "New data size: $(human_size "$new_total_bytes")"
 		else
 			log_info "New NFS path does not exist yet (expected). Will be created during copy-data."
-			state_del "$context" "$namespace" "$app" "NEW_TOTAL_SIZE"
+			state_del "$context" "$namespace" "$migration_id" "NEW_TOTAL_SIZE"
 		fi
 	fi
 
-	log_ok "discover-new complete for $app in $context/$namespace"
+	log_ok "discover-new complete for $migration_id in $context/$namespace"
 	echo ""
 	echo "===== Next steps ====="
-	echo "1. Run: $SCRIPT_NAME copy-data $context $namespace $app"
+	echo "1. Run: $SCRIPT_NAME copy-data $context $namespace $migration_id"
 }
 
 # ======================================================================
 # SUBCOMMAND: copy-data
 # ======================================================================
 copy_data() {
-	local context="" namespace="" app="" do_backup=false
+	local context="" namespace="" migration_id="" do_backup=false
 
 	context="$1"
 	shift || true
 	namespace="$1"
 	shift || true
-	app="$1"
+	migration_id="$1"
 	shift || true
 
 	while [[ $# -gt 0 ]]; do
@@ -786,20 +795,20 @@ copy_data() {
 		esac
 	done
 
-	if [[ -z "$context" || -z "$namespace" || -z "$app" ]]; then
-		log_error "Usage: $SCRIPT_NAME copy-data [--backup] <context> <namespace> <app-name>"
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME copy-data [--backup] <context> <namespace> <migration-id>"
 		exit 1
 	fi
 
-	state_require "$context" "$namespace" "$app"
+	state_require "$context" "$namespace" "$migration_id"
 
 	local depl_old depl_new nfs_host_old nfs_path_old nfs_host_new nfs_path_new
-	depl_old=$(state_get "$context" "$namespace" "$app" "DEPLOY_OLD")
-	depl_new=$(state_get "$context" "$namespace" "$app" "DEPLOY_NEW")
-	nfs_host_old=$(state_get "$context" "$namespace" "$app" "OLD_NFS_HOST")
-	nfs_path_old=$(state_get "$context" "$namespace" "$app" "NFS_PATH_OLD")
-	nfs_host_new=$(state_get "$context" "$namespace" "$app" "NEW_NFS_HOST")
-	nfs_path_new=$(state_get "$context" "$namespace" "$app" "NFS_PATH_NEW")
+	depl_old=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD")
+	depl_new=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_NEW")
+	nfs_host_old=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST")
+	nfs_path_old=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_OLD")
+	nfs_host_new=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_HOST")
+	nfs_path_new=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_NEW")
 
 	# Validate required fields
 	local missing=false
@@ -923,7 +932,7 @@ copy_data() {
 
 	# Optional backup
 	if $do_backup; then
-		local backup_file="/tmp/${namespace}-${app}-pre-migracion.tgz"
+		local backup_file="/tmp/${namespace}-${migration_id}-pre-migracion.tgz"
 		log_info "Creating backup: $backup_file"
 		if confirm "Create backup tarball on $nfs_host_old?"; then
 			ssh "$nfs_host_old" "tar -czf '$backup_file' -C '$nfs_path_old' ." 2>/dev/null || log_warn "Backup failed (continuing)"
@@ -1016,35 +1025,35 @@ copy_data() {
 	fi
 
 	# Record copy in state
-	state_set "$context" "$namespace" "$app" "PHASE" "copied"
-	state_set "$context" "$namespace" "$app" "COPY_TIMESTAMP" "$(date -Iseconds)"
-	state_set "$context" "$namespace" "$app" "COPY_FILE_COUNT_OLD" "$old_count"
-	state_set "$context" "$namespace" "$app" "COPY_FILE_COUNT_NEW" "$new_count2"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "copied"
+	state_set "$context" "$namespace" "$migration_id" "COPY_TIMESTAMP" "$(date -Iseconds)"
+	state_set "$context" "$namespace" "$migration_id" "COPY_FILE_COUNT_OLD" "$old_count"
+	state_set "$context" "$namespace" "$migration_id" "COPY_FILE_COUNT_NEW" "$new_count2"
 
 	echo ""
-	log_ok "copy-data complete for $app in $context/$namespace"
+	log_ok "copy-data complete for $migration_id in $context/$namespace"
 	echo ""
 	echo "===== Next steps ====="
-	echo "1. Run: $SCRIPT_NAME validate $context $namespace $app"
+	echo "1. Run: $SCRIPT_NAME validate $context $namespace $migration_id"
 }
 
 # ======================================================================
 # SUBCOMMAND: validate
 # ======================================================================
 validate() {
-	local context="$1" namespace="$2" app="$3"
+	local context="$1" namespace="$2" migration_id="$3"
 
-	if [[ -z "$context" || -z "$namespace" || -z "$app" ]]; then
-		log_error "Usage: $SCRIPT_NAME validate <context> <namespace> <app-name>"
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME validate <context> <namespace> <migration-id>"
 		exit 1
 	fi
 
-	state_require "$context" "$namespace" "$app"
+	state_require "$context" "$namespace" "$migration_id"
 
 	local depl_new mount_new pvc_new
-	depl_new=$(state_get "$context" "$namespace" "$app" "DEPLOY_NEW")
-	mount_new=$(state_get "$context" "$namespace" "$app" "MOUNT_NEW")
-	pvc_new=$(state_get "$context" "$namespace" "$app" "PVC_NEW")
+	depl_new=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_NEW")
+	mount_new=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW")
+	pvc_new=$(state_get "$context" "$namespace" "$migration_id" "PVC_NEW")
 
 	if [[ -z "$depl_new" ]]; then
 		log_error "No new deployment found in state. Run discover-new first."
@@ -1103,7 +1112,7 @@ validate() {
 
 		# Compare with old manifest if available
 		local manifest_old
-		manifest_old="$STATE_BASE/$context/$namespace/${app}.old.manifest"
+		manifest_old="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
 		if [[ -f "$manifest_old" ]]; then
 			echo ""
 			log_info "Comparing with old file manifest..."
@@ -1130,9 +1139,9 @@ validate() {
 	echo ""
 	log_info "===== PV Cleanup Assessment ====="
 	local pvc_old_name pvc_new_name pv_old_name
-	pvc_old_name=$(state_get "$context" "$namespace" "$app" "PVC_OLD" || true)
-	pvc_new_name=$(state_get "$context" "$namespace" "$app" "PVC_NEW" || true)
-	pv_old_name=$(state_get "$context" "$namespace" "$app" "PV_OLD" || true)
+	pvc_old_name=$(state_get "$context" "$namespace" "$migration_id" "PVC_OLD" || true)
+	pvc_new_name=$(state_get "$context" "$namespace" "$migration_id" "PVC_NEW" || true)
+	pv_old_name=$(state_get "$context" "$namespace" "$migration_id" "PV_OLD" || true)
 
 	# Old PVC status
 	local pvc_old_status="NotFound"
@@ -1156,8 +1165,8 @@ validate() {
 	fi
 	# NFS info from state (PV with CSI driver doesn't have spec.nfs)
 	local old_nfs_host_show old_nfs_path_show
-	old_nfs_host_show=$(state_get "$context" "$namespace" "$app" "OLD_NFS_HOST" || true)
-	old_nfs_path_show=$(state_get "$context" "$namespace" "$app" "NFS_PATH_OLD" || true)
+	old_nfs_host_show=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST" || true)
+	old_nfs_path_show=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_OLD" || true)
 
 	# New PVC info
 	local new_pvc_size="" new_pvc_status="NotFound"
@@ -1187,10 +1196,10 @@ validate() {
 
 	# Size comparison — always recompute new size since copy-data may have run
 	local old_size_bytes new_size_bytes
-	old_size_bytes=$(state_get "$context" "$namespace" "$app" "OLD_TOTAL_SIZE" || true)
-	new_size_bytes=$(compute_total_size_nfs "$(state_get "$context" "$namespace" "$app" "NEW_NFS_HOST" || true)" \
-		"$(state_get "$context" "$namespace" "$app" "NFS_PATH_NEW" || true)")
-	state_set "$context" "$namespace" "$app" "NEW_TOTAL_SIZE" "$new_size_bytes"
+	old_size_bytes=$(state_get "$context" "$namespace" "$migration_id" "OLD_TOTAL_SIZE" || true)
+	new_size_bytes=$(compute_total_size_nfs "$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_HOST" || true)" \
+		"$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_NEW" || true)")
+	state_set "$context" "$namespace" "$migration_id" "NEW_TOTAL_SIZE" "$new_size_bytes"
 	if [[ -n "$old_size_bytes" && "$old_size_bytes" != "0" ]]; then
 		echo "  Data size (old): $(human_size "$old_size_bytes")"
 	fi
@@ -1217,37 +1226,37 @@ validate() {
 		log_info "Old PV no longer exists — nothing to clean up on the PV level."
 	fi
 
-	state_set "$context" "$namespace" "$app" "PHASE" "validated"
-	state_set "$context" "$namespace" "$app" "VALIDATION_POD" "$pod_name"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "validated"
+	state_set "$context" "$namespace" "$migration_id" "VALIDATION_POD" "$pod_name"
 
 	echo ""
-	log_ok "Validation complete for $app in $context/$namespace"
+	log_ok "Validation complete for $migration_id in $context/$namespace"
 	echo ""
 	echo "===== Next steps ====="
 	echo "1. Perform manual functional testing (UI, API, etc.)"
-	echo "2. When satisfied, run: $SCRIPT_NAME cleanup $context $namespace $app"
+	echo "2. When satisfied, run: $SCRIPT_NAME cleanup $context $namespace $migration_id"
 }
 
 # ======================================================================
 # SUBCOMMAND: cleanup
 # ======================================================================
 cleanup() {
-	local context="$1" namespace="$2" app="$3"
+	local context="$1" namespace="$2" migration_id="$3"
 
-	if [[ -z "$context" || -z "$namespace" || -z "$app" ]]; then
-		log_error "Usage: $SCRIPT_NAME cleanup <context> <namespace> <app-name>"
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME cleanup <context> <namespace> <migration-id>"
 		exit 1
 	fi
 
-	state_require "$context" "$namespace" "$app"
+	state_require "$context" "$namespace" "$migration_id"
 
 	local depl_old depl_new pvc_old pv_old pvc_new pv_new
-	depl_old=$(state_get "$context" "$namespace" "$app" "DEPLOY_OLD")
-	depl_new=$(state_get "$context" "$namespace" "$app" "DEPLOY_NEW")
-	pvc_old=$(state_get "$context" "$namespace" "$app" "PVC_OLD")
-	pv_old=$(state_get "$context" "$namespace" "$app" "PV_OLD")
-	pvc_new=$(state_get "$context" "$namespace" "$app" "PVC_NEW" || true)
-	pv_new=$(state_get "$context" "$namespace" "$app" "PV_NEW" || true)
+	depl_old=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD")
+	depl_new=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_NEW")
+	pvc_old=$(state_get "$context" "$namespace" "$migration_id" "PVC_OLD")
+	pv_old=$(state_get "$context" "$namespace" "$migration_id" "PV_OLD")
+	pvc_new=$(state_get "$context" "$namespace" "$migration_id" "PVC_NEW" || true)
+	pv_new=$(state_get "$context" "$namespace" "$migration_id" "PV_NEW" || true)
 
 	# --- Guard: old == new means there's nothing to clean up ---
 	if [[ "$depl_old" == "$depl_new" ]]; then
@@ -1260,7 +1269,7 @@ cleanup() {
 	if ! kubectl get deployment "$depl_old" -n "$namespace" --context="$context" &>/dev/null; then
 		log_warn "Old deployment '$depl_old' no longer exists in the cluster."
 		log_info "Nothing to delete. Marking phase as 'cleaned'."
-		state_set "$context" "$namespace" "$app" "PHASE" "cleaned"
+		state_set "$context" "$namespace" "$migration_id" "PHASE" "cleaned"
 		return
 	fi
 
@@ -1321,30 +1330,30 @@ cleanup() {
 		echo ""
 	fi
 
-	state_set "$context" "$namespace" "$app" "PHASE" "cleaned"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "cleaned"
 
-	log_ok "Cleanup complete for $app in $context/$namespace"
+	log_ok "Cleanup complete for $migration_id in $context/$namespace"
 }
 
 # ======================================================================
 # SUBCOMMAND: status
 # ======================================================================
 show_status() {
-	local context="$1" namespace="$2" app="$3"
+	local context="$1" namespace="$2" migration_id="$3"
 
-	if [[ -z "$context" || -z "$namespace" || -z "$app" ]]; then
-		log_error "Usage: $SCRIPT_NAME status <context> <namespace> <app-name>"
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME status <context> <namespace> <migration-id>"
 		exit 1
 	fi
 
 	local sf
-	sf=$(state_file_path "$context" "$namespace" "$app")
+	sf=$(state_file_path "$context" "$namespace" "$migration_id")
 	if [[ ! -f "$sf" ]]; then
 		log_error "No state file found at: $sf"
 		exit 1
 	fi
 
-	echo "===== State: $context/$namespace/$app ====="
+	echo "===== State: $context/$namespace/$migration_id ====="
 	echo "File: $sf"
 	echo ""
 	cat "$sf"
@@ -1352,7 +1361,7 @@ show_status() {
 
 	# Show migration summary if we have both old and new
 	local phase
-	phase=$(state_get "$context" "$namespace" "$app" "PHASE" || true)
+	phase=$(state_get "$context" "$namespace" "$migration_id" "PHASE" || true)
 	echo "Current phase: ${phase:-<none>}"
 }
 
