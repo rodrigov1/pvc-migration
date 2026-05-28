@@ -1,0 +1,42 @@
+AL correr el discover-old (chart viejo): 
+❯ cat ~/.pvc-migration/state/prod/n8n/n8n-n8n.env
+PHASE=discovered-old
+CONTEXT=prod
+NAMESPACE=n8n
+APP=n8n-n8n
+DEPLOY_OLD=n8n-n8n
+PVC_OLD=n8n-n8n-deployment-pvc
+PV_OLD=pvc-2e3a5df7-70da-41b9-b6bf-cf97b753d2d7
+VOLUME_HANDLE_OLD=kube-nas-1.psi.unc.edu.ar#srv/nfs/kube-prod-disk1#pvc-2e3a5df7-70da-41b9-b6bf-cf97b753d2d7##
+OLD_NFS_HOST=kube-nas-1.psi.unc.edu.ar
+OLD_NFS_SHARE_BASE=/srv/nfs/kube-prod-disk1
+OLD_PV_UID=pvc-2e3a5df7-70da-41b9-b6bf-cf97b753d2d7
+MOUNT_OLD=/home/node/
+SUBPATH_OLD=n8n/n8n/home/node/
+NFS_PATH_OLD=/srv/nfs/kube-prod-disk1/pvc-2e3a5df7-70da-41b9-b6bf-cf97b753d2d7/n8n/n8n/home/node//
+OLD_TOTAL_SIZE=740891279
+
+Luego al aplicar el chart nuevo, ya no puedo hacer discover-new porq imagino cambio el deploy y el nombre del .env no lo toma bien o algo asi
+
+pvc-migration on  main [?] 
+❯ ./pvc_migration.sh discover-new prod n8n n8n-n8n
+[ERROR] No deployments found matching 'n8n-n8n' in prod/n8n
+[ERROR] Has the new chart been synced?
+
+pvc-migration on  main [?] 
+❯ kubectl get pods -n n8n
+NAME                           READY   STATUS             RESTARTS      AGE
+n8n-5bcb9754b5-2487s           0/1     CrashLoopBackOff   3 (48s ago)   2m40s
+qdrant-5b88dd8f98-hssqc        1/1     Running            0             123m
+redis-famaf-584dc9f464-gfwgg   1/1     Running            0             158m
+
+pvc-migration on  main [?] 
+❯ kubectl get deployment -n n8n
+NAME          READY   UP-TO-DATE   AVAILABLE   AGE
+n8n           0/1     1            0           2m46s
+qdrant        1/1     1            1           138m
+redis-famaf   1/1     1            1           3h16m
+
+
+## COSAS A REVISAR
+- eliminar PV de las apps ya migradas con sus volumes verificados (n8n)
