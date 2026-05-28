@@ -1313,8 +1313,49 @@ backup() {
 		echo '  echo "[Mount $((i+1))/$mount_count] Complete."'
 		echo 'done'
 		echo ''
+		echo '# Write metadata'
 		echo 'ssh "$nfs_host_old" "echo '\''mount_count=$mount_count'\'' > '\''${backup_base}/metadata.env'\''"'
+		echo ''
 		echo 'echo ""'
+		echo 'echo "===== Verification ====="'
+		echo 'all_ok=true'
+		echo 'total_src=0 total_tgz=0'
+		echo 'for ((i = 0; i < mount_count; i++)); do'
+		echo '  sub="${subpath_old_list[$i]}"'
+		echo '  src="${nfs_path_old}${sub:+${sub}/}"'
+		echo '  echo "[Mount $((i+1))/$mount_count] Verifying ..."'
+		echo '  src_c=$(ssh "$nfs_host_old" "find \"$src\" -type f 2>/dev/null | wc -l" || echo "0")'
+		echo '  tgz_c=$(ssh "$nfs_host_old" "tar -tzf '\''${backup_base}/${i}.tgz'\'' 2>/dev/null | grep -c -v '\''/$'\'' 2>/dev/null || echo 0")'
+		echo '  total_src=$((total_src + src_c))'
+		echo '  total_tgz=$((total_tgz + tgz_c))'
+		echo '  echo "  File count: source=$src_c backup=$tgz_c"'
+		echo '  if [[ "$src_c" != "$tgz_c" ]]; then'
+		echo '    echo "  [WARN] File count mismatch"; all_ok=false'
+		echo '  else'
+		echo '    echo "  [OK] File count matches"'
+		echo '  fi'
+		echo '  src_md5=$(ssh "$nfs_host_old" "find \"$src\" -type f -exec md5sum {} + 2>/dev/null | awk '\''{print \$1}'\'' | sort | md5sum | awk '\''{print \$1}'\''" || true)'
+		echo '  tgz_md5=$(ssh "$nfs_host_old" "tmpdir=\$(mktemp -d /tmp/pvc-mig-verify-XXXXXXXXX) && cd \"\$tmpdir\" && tar -xzf '\''${backup_base}/${i}.tgz'\'' && find . -type f -exec md5sum {} + 2>/dev/null | awk '\''{print \$1}'\'' | sort | md5sum | awk '\''{print \$1}'\'' && rm -rf \"\$tmpdir\"" || true)'
+		echo '  if [[ -n "$src_md5" && -n "$tgz_md5" ]]; then'
+		echo '    if [[ "$src_md5" == "$tgz_md5" ]]; then'
+		echo '      echo "  [OK] md5 aggregate matches"'
+		echo '    else'
+		echo '      echo "  [WARN] md5 aggregate differs"; all_ok=false'
+		echo '    fi'
+		echo '  else'
+		echo '    echo "  [INFO] md5 check skipped (empty mount or compute error)"'
+		echo '  fi'
+		echo 'done'
+		echo 'echo ""'
+		echo 'echo "Total file count: source=$total_src backup=$total_tgz"'
+		echo 'if [[ "$total_src" == "$total_tgz" ]]; then echo "[OK] Total matches"; else echo "[WARN] Total mismatch"; all_ok=false; fi'
+		echo 'echo ""'
+		echo 'if $all_ok; then'
+		echo '  echo "[OK] All mounts verified successfully."'
+		echo 'else'
+		echo '  echo "[ERROR] Verification failed."'
+		echo '  exit 1'
+		echo 'fi'
 		echo 'echo "Backup completed at $(date -Iseconds)"'
 	} > "$tmp_script"
 	chmod +x "$tmp_script"
@@ -1341,6 +1382,11 @@ backup() {
 			log_info "tmux session '${session_name}' started"
 			log_info "  Attach: tmux attach -t ${session_name}"
 			while tmux has-session -t "$session_name" 2>/dev/null; do sleep 5; done
+			if ! tmux capture-pane -t "$session_name" -p 2>/dev/null | tail -5 | grep -q "verified successfully"; then
+				log_error "Backup tmux session encountered an error."
+				rm -f "$tmp_script"
+				return
+			fi
 		else
 			screen -dmS "$session_name" bash "$tmp_script"
 			log_info "screen session '${session_name}' started"
@@ -1349,7 +1395,11 @@ backup() {
 		fi
 	else
 		log_info "Starting backup (inline)..."
-		bash "$tmp_script"
+		if ! bash "$tmp_script"; then
+			log_error "Backup script failed — check output above."
+			rm -f "$tmp_script"
+			return
+		fi
 	fi
 
 	end_time=$(date +%s)
