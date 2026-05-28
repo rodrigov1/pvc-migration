@@ -1,5 +1,5 @@
 cmd_status() {
-	local context="$1" namespace="$2" migration_id="$3"
+	local context="${1:-}" namespace="${2:-}" migration_id="${3:-}"
 
 	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
 		log_error "Usage: $SCRIPT_NAME status <context> <namespace> <migration-id>"
