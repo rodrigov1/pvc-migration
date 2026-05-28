@@ -43,10 +43,16 @@ Subcommands:
     Discover and capture new-side PVC/PV/NFS state after chart impact.
     --deploy is needed if the new deployment name differs from the old one.
 
-  copy-data <context> <namespace> <migration-id> [--backup] [--compress]
+  backup <context> <namespace> <migration-id>
+    Backup old NFS data to tarballs BEFORE deploying the new chart
+    (required when PV has ReclaimPolicy:Delete). Creates per-mount .tgz
+    files at share level on the old NFS host.
+
+  copy-data <context> <namespace> <migration-id> [--compress]
     Copy data from old NFS path to new NFS path via tar-pipe over SSH.
-    No compression by default (faster for large data). Add --compress for slow links.
-    Shows progress via pv if available.
+    If the old NFS source is no longer available, automatically restores
+    from backup created by the 'backup' subcommand.
+    Add --compress for slow links. Shows progress via pv if available.
 
   validate <context> <namespace> <migration-id>
     Scale up the new deployment, wait for readiness, verify files inside the pod.
@@ -59,12 +65,21 @@ Subcommands:
 
 State files: \$STATE_BASE/<context>/<namespace>/<migration-id>.env
 
-Examples:
+Examples (retain — no backup needed):
   \$SCRIPT_NAME discover-old prod n8n redis-famaf --deploy n8n-redis-famaf --pvc n8n-redis-famaf-deployment-pvc
   \$SCRIPT_NAME discover-new prod n8n redis-famaf --deploy redis-famaf
-  \$SCRIPT_NAME copy-data prod n8n redis-famaf --backup
+  \$SCRIPT_NAME copy-data prod n8n redis-famaf
   \$SCRIPT_NAME validate prod n8n redis-famaf
   \$SCRIPT_NAME cleanup prod n8n redis-famaf
+
+Examples (ReclaimPolicy:Delete — backup first):
+  \$SCRIPT_NAME discover-old prod nahuel nahuel-java --deploy nahuel-nahuel-java --pvc nahuel-nfs-pvc
+  \$SCRIPT_NAME backup prod nahuel nahuel-java
+  # Now deploy the new chart (helm upgrade), then:
+  \$SCRIPT_NAME discover-new prod nahuel nahuel-java --deploy nahuel-java
+  \$SCRIPT_NAME copy-data prod nahuel nahuel-java
+  \$SCRIPT_NAME validate prod nahuel nahuel-java
+  \$SCRIPT_NAME cleanup prod nahuel nahuel-java
 EOF
 	exit 1
 }
@@ -811,7 +826,7 @@ discover_new() {
 # SUBCOMMAND: copy-data
 # ======================================================================
 copy_data() {
-	local context="" namespace="" migration_id="" do_backup=false use_compress=false
+	local context="" namespace="" migration_id="" use_compress=false
 
 	context="$1"
 	shift || true
@@ -822,10 +837,6 @@ copy_data() {
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
-		--backup)
-			do_backup=true
-			shift
-			;;
 		--compress)
 			use_compress=true
 			shift
@@ -838,7 +849,7 @@ copy_data() {
 	done
 
 	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME copy-data [--backup] [--compress] <context> <namespace> <migration-id>"
+		log_error "Usage: $SCRIPT_NAME copy-data [--compress] <context> <namespace> <migration-id>"
 		exit 1
 	fi
 
@@ -1022,28 +1033,6 @@ copy_data() {
 		echo "       Old: $nfs_host_old:$src"
 		echo "       New: $nfs_host_new:$dst"
 	done
-
-	# Optional backup (only if source NFS is still accessible)
-	if $do_backup; then
-		if $source_available; then
-			log_info "Creating backup at $nfs_host_old:$backup_base ..."
-			if confirm "Create backup on $nfs_host_old?"; then
-				ssh "$nfs_host_old" "mkdir -p '$backup_base'"
-				ssh "$nfs_host_old" "rm -f '$backup_base'/*.tgz"
-				for ((i = 0; i < mount_count; i++)); do
-					local os="${subpath_old_list[$i]}"
-					local src="${nfs_path_old}${os:+${os}/}"
-					log_info "  Backing up mount $((i+1)): $src"
-					ssh "$nfs_host_old" "tar -czf '$backup_base/$i.tgz' -C '$src' ." 2>/dev/null || log_warn "Backup failed for mount $((i+1))"
-				done
-				ssh "$nfs_host_old" "echo 'mount_count=$mount_count' > '$backup_base/metadata.env'"
-			log_ok "Backup complete: $nfs_host_old:$backup_base"
-			fi
-		else
-			log_warn "Source NFS path does not exist — cannot create backup."
-			log_info "If a backup already exists at $backup_base, it will be used for restore."
-		fi
-	fi
 
 	# Determine copy mode: source or restore
 	local restore_mode=false
@@ -1236,6 +1225,145 @@ copy_data() {
 	echo ""
 	echo "===== Next steps ====="
 	echo "1. Run: $SCRIPT_NAME validate $context $namespace $migration_id"
+}
+
+# ======================================================================
+# SUBCOMMAND: backup
+# ======================================================================
+backup() {
+	local context="$1" namespace="$2" migration_id="$3"
+
+	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
+		log_error "Usage: $SCRIPT_NAME backup <context> <namespace> <migration-id>"
+		exit 1
+	fi
+
+	state_require "$context" "$namespace" "$migration_id"
+
+	local nfs_host_old nfs_path_old subpaths_str
+	nfs_host_old=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST")
+	nfs_path_old=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_OLD")
+	subpaths_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
+
+	if [[ -z "$nfs_host_old" || -z "$nfs_path_old" ]]; then
+		log_error "Missing old NFS info. Run 'discover-old' first."
+		exit 1
+	fi
+
+	log_info "Verifying access to old NFS host..."
+	if ! ssh "$nfs_host_old" "test -d '$nfs_path_old'" 2>/dev/null; then
+		log_error "Old NFS path inaccessible: $nfs_host_old:$nfs_path_old"
+		exit 1
+	fi
+
+	local backup_base
+	backup_base="$(dirname "$nfs_path_old")/${migration_id}-backup"
+
+	# Parse mounts
+	local -a subpath_old_list=()
+	if [[ -n "$subpaths_str" ]]; then
+		while IFS= read -r line; do subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_str" | sed 's/__/\n/g')"
+	fi
+
+	local mount_count=${#subpath_old_list[@]}
+	if [[ "$mount_count" -eq 0 ]]; then
+		mount_count=1
+		subpath_old_list=("")
+	fi
+
+	# Display backup plan
+	echo ""
+	log_info "Backup plan for $migration_id in $context/$namespace"
+	echo "  Old NFS host: $nfs_host_old"
+	echo "  Old PV root:  $nfs_path_old"
+	echo "  Backup dir:   $backup_base"
+	echo "  Mounts:       $mount_count"
+	for ((i = 0; i < mount_count; i++)); do
+		local os="${subpath_old_list[$i]}"
+		local src="${nfs_path_old}${os:+${os}/}"
+		echo "  [$((i+1))] $src -> ${backup_base}/${i}.tgz"
+	done
+
+	if ! confirm "Proceed with backup?"; then
+		log_info "Backup cancelled."
+		return
+	fi
+
+	# Create backup dir on old NFS host
+	ssh "$nfs_host_old" "mkdir -p '$backup_base' && rm -f '$backup_base'/*.tgz"
+
+	# Generate temp backup script
+	local tmp_script="/tmp/pvc-mig-backup-${migration_id}-$$.sh"
+	{
+		echo '#!/bin/bash'
+		echo 'set -euo pipefail'
+		echo ''
+		echo "nfs_host_old='$nfs_host_old'"
+		echo "nfs_path_old='$nfs_path_old'"
+		echo "backup_base='$backup_base'"
+		echo "mount_count=$mount_count"
+		echo ''
+		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do echo -n "'$v' "; done))"
+		echo ''
+		echo 'for ((i = 0; i < mount_count; i++)); do'
+		echo '  sub="${subpath_old_list[$i]}"'
+		echo '  src="${nfs_path_old}${sub:+${sub}/}"'
+		echo '  echo "[Mount $((i+1))/$mount_count] Backing up $src ..."'
+		echo '  ssh "$nfs_host_old" "tar -czf '\''${backup_base}/${i}.tgz'\'' -C '\''$src'\'' ." 2>/dev/null || { echo "[ERROR] Backup failed for mount $((i+1))"; exit 1; }'
+		echo '  echo "[Mount $((i+1))/$mount_count] Complete."'
+		echo 'done'
+		echo ''
+		echo 'ssh "$nfs_host_old" "echo '\''mount_count=$mount_count'\'' > '\''${backup_base}/metadata.env'\''"'
+		echo 'echo ""'
+		echo 'echo "Backup completed at $(date -Iseconds)"'
+	} > "$tmp_script"
+	chmod +x "$tmp_script"
+
+	# tmux/screen wrapper (same pattern as copy-data)
+	local use_persistent=false term_cmd=""
+	if command -v tmux &>/dev/null; then
+		if confirm_default_yes "Use tmux session (survives SSH disconnects)?"; then
+			use_persistent=true; term_cmd="tmux"
+		fi
+	elif command -v screen &>/dev/null; then
+		if confirm_default_yes "Use screen session (survives SSH disconnects)?"; then
+			use_persistent=true; term_cmd="screen"
+		fi
+	fi
+
+	local start_time end_time elapsed
+	start_time=$(date +%s)
+
+	if $use_persistent; then
+		local session_name="pvc-mig-backup-${migration_id}"
+		if [[ "$term_cmd" == "tmux" ]]; then
+			tmux new-session -d -s "$session_name" "$tmp_script"
+			log_info "tmux session '${session_name}' started"
+			log_info "  Attach: tmux attach -t ${session_name}"
+			while tmux has-session -t "$session_name" 2>/dev/null; do sleep 5; done
+		else
+			screen -dmS "$session_name" bash "$tmp_script"
+			log_info "screen session '${session_name}' started"
+			log_info "  Attach: screen -r ${session_name}"
+			while screen -list 2>/dev/null | grep -q "$session_name"; do sleep 5; done
+		fi
+	else
+		log_info "Starting backup (inline)..."
+		bash "$tmp_script"
+	fi
+
+	end_time=$(date +%s)
+	elapsed=$((end_time - start_time))
+	rm -f "$tmp_script"
+
+	log_ok "Backup completed in ${elapsed}s"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "backed_up"
+	echo ""
+	log_ok "backup complete for $migration_id in $context/$namespace"
+	echo ""
+	echo "===== Next steps ====="
+	echo "1. Deploy the new chart (helm upgrade)"
+	echo "2. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
 }
 
 # ======================================================================
@@ -1609,6 +1737,9 @@ discover-old)
 	;;
 discover-new | discover_new)
 	discover_new "$@"
+	;;
+backup)
+	backup "$@"
 	;;
 copy-data | copy_data)
 	copy_data "$@"
