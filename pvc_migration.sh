@@ -281,7 +281,7 @@ capture_file_manifest() {
 	# Ensure trailing / for clean strip
 	local base_path="${mount_path%/}/"
 	kubectl exec "$pod" -n "$ns" --context="$ctx" -- \
-		find "$mount_path" -type f -exec ls -ln {} \; 2>/dev/null |
+		find "$mount_path" -type f -exec ls -ln {} + 2>/dev/null |
 		strip_path_prefix "$base_path" >"$outfile" || {
 		log_warn "kubectl exec failed (may be transient)."
 		return 1
@@ -1313,7 +1313,7 @@ validate() {
 			manifest_new=$(mktemp)
 			local base_path="${single_mount%/}/"
 			if kubectl exec "$pod_name" -n "$namespace" --context="$context" -- \
-				find "$single_mount" -type f -exec ls -ln {} \; 2>/dev/null |
+				find "$single_mount" -type f -exec ls -ln {} + 2>/dev/null |
 				strip_path_prefix "$base_path" >"$manifest_new" 2>/dev/null; then
 				if diff <(sort "$manifest_old") <(sort "$manifest_new") &>/dev/null; then
 					log_ok "Files match old manifest."
