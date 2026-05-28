@@ -497,17 +497,21 @@ discover_old() {
 	local pod_name
 	pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
 
-	# Per-mount manifests from running pod (primary for multi-mount validate)
+	# Per-mount manifests from running pod (primary for multi-mount validate) — parallel
 	if [[ -n "$pod_name" ]]; then
-		local mounts_str mnt_idx=0
+		local mounts_str
 		mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
 		if [[ -n "$mounts_str" ]]; then
+			local mnt_idx=0 pids=()
 			while IFS= read -r single_mount; do
 				[[ -z "$single_mount" ]] && continue
 				mnt_idx=$((mnt_idx + 1))
 				local per_mount_manifest="${manifest_base}.${mnt_idx}"
-				capture_file_manifest "$context" "$namespace" "$pod_name" "$single_mount" "$per_mount_manifest" 2>/dev/null || true
+				capture_file_manifest "$context" "$namespace" "$pod_name" "$single_mount" "$per_mount_manifest" 2>/dev/null || true &
+				pids+=($!)
 			done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
+			for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+			log_info "All per-mount manifests captured (${#pids[@]} total)."
 		fi
 	else
 		log_info "No running pod — capturing combined NFS manifest (needed for validate)."
