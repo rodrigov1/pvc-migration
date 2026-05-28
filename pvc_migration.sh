@@ -1294,9 +1294,13 @@ backup() {
 
 	# Generate temp backup script
 	local tmp_script="/tmp/pvc-mig-backup-${migration_id}-$$.sh"
+	local result_file="/tmp/pvc-mig-backup-result-${migration_id}-$$.txt"
+	rm -f "$result_file"
 	{
 		echo '#!/bin/bash'
 		echo 'set -euo pipefail'
+		echo "result_file='$result_file'"
+		echo 'trap "echo exit_code=\$? > \"\$result_file\"" EXIT'
 		echo ''
 		echo "nfs_host_old='$nfs_host_old'"
 		echo "nfs_path_old='$nfs_path_old'"
@@ -1367,6 +1371,7 @@ backup() {
 	local start_time end_time elapsed
 	start_time=$(date +%s)
 
+	local backup_failed=false
 	if $use_persistent; then
 		local session_name="pvc-mig-backup-${migration_id}"
 		if [[ "$term_cmd" == "tmux" ]]; then
@@ -1374,29 +1379,37 @@ backup() {
 			log_info "tmux session '${session_name}' started"
 			log_info "  Attach: tmux attach -t ${session_name}"
 			while tmux has-session -t "$session_name" 2>/dev/null; do sleep 5; done
-			if ! tmux capture-pane -t "$session_name" -p 2>/dev/null | tail -5 | grep -q "verified successfully"; then
-				log_error "Backup tmux session encountered an error."
-				rm -f "$tmp_script"
-				return
-			fi
 		else
 			screen -dmS "$session_name" bash "$tmp_script"
 			log_info "screen session '${session_name}' started"
 			log_info "  Attach: screen -r ${session_name}"
 			while screen -list 2>/dev/null | grep -q "$session_name"; do sleep 5; done
 		fi
+		# Check result file written by trap in temp script
+		if [[ -f "$result_file" ]]; then
+			local saved_exit
+			saved_exit=$(grep -o 'exit_code=[0-9]*' "$result_file" | cut -d= -f2)
+			[[ "$saved_exit" != "0" ]] && backup_failed=true
+			rm -f "$result_file"
+		else
+			log_warn "Backup session result file not found (session may have been killed)."
+			backup_failed=true
+		fi
 	else
 		log_info "Starting backup (inline)..."
 		if ! bash "$tmp_script"; then
-			log_error "Backup script failed — check output above."
-			rm -f "$tmp_script"
-			return
+			backup_failed=true
 		fi
 	fi
 
+	rm -f "$tmp_script" "$result_file"
 	end_time=$(date +%s)
 	elapsed=$((end_time - start_time))
-	rm -f "$tmp_script"
+
+	if $backup_failed; then
+		log_error "Backup failed. Re-run to retry."
+		return
+	fi
 
 	log_ok "Backup completed in ${elapsed}s"
 	state_set "$context" "$namespace" "$migration_id" "PHASE" "backed_up"
