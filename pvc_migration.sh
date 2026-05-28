@@ -286,9 +286,6 @@ capture_file_manifest() {
 		log_warn "kubectl exec failed (may be transient)."
 		return 1
 	}
-	# Capture md5 for each file (batch with + for speed)
-	kubectl exec "$pod" -n "$ns" --context="$ctx" -- \
-		find "$mount_path" -type f -exec md5sum {} + 2>/dev/null >"${outfile}.md5" || true
 	log_ok "Manifest saved: $outfile"
 }
 
@@ -299,7 +296,6 @@ capture_file_manifest_nfs() {
 		log_error "SSH to $nfs_host failed"
 		return 1
 	}
-	ssh "$nfs_host" "find '$nfs_path' -type f -exec md5sum {} +" 2>/dev/null >"${outfile}.md5" || true
 	log_ok "Manifest saved: $outfile"
 }
 
@@ -496,19 +492,12 @@ discover_old() {
 		log_info "  pv_uid=$pv_uid"
 	fi
 
-	# Capture file manifests — NFS root (combined) if accessible, else per-mount via pod
+	# Capture file manifests
 	local manifest_base="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-	local nfs_manifest_ok=false
-	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
-		if capture_file_manifest_nfs "$nfs_host" "$nfs_path_old" "$manifest_base" 2>/dev/null; then
-			nfs_manifest_ok=true
-			log_info "Combined NFS manifest saved (PV root)"
-		fi
-	fi
-
-	# Per-mount manifests from running pod (fallback or complement)
 	local pod_name
 	pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
+
+	# Per-mount manifests from running pod (primary for multi-mount validate)
 	if [[ -n "$pod_name" ]]; then
 		local mounts_str mnt_idx=0
 		mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
@@ -521,22 +510,25 @@ discover_old() {
 			done <<< "$(echo "$mounts_str" | tr '__' '\n')"
 		fi
 	else
-		log_info "No running pod available for per-mount manifest capture."
+		log_info "No running pod — capturing combined NFS manifest (needed for validate)."
+		# Combined NFS manifest as fallback (single-mount or no-pod scenarios)
+		if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
+			capture_file_manifest_nfs "$nfs_host" "$nfs_path_old" "$manifest_base" 2>/dev/null || true
+		fi
 	fi
 
-	# Compute total size from NFS root (most accurate) or fallback to per-mount sums
+	# Compute total size via du -sb (instant, filesystem-level)
 	local old_total_bytes=0
-	if $nfs_manifest_ok; then
-		old_total_bytes=$(compute_total_size_manifest "$manifest_base")
+	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
+		old_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_old")
 	elif [[ -f "${manifest_base}.1" ]]; then
 		for mf in "$manifest_base".*; do
-			[[ "$mf" == *".md5" ]] && continue
 			local sz
 			sz=$(compute_total_size_manifest "$mf")
 			old_total_bytes=$((old_total_bytes + sz))
 		done
-	else
-		old_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_old")
+	elif [[ -f "$manifest_base" ]]; then
+		old_total_bytes=$(compute_total_size_manifest "$manifest_base")
 	fi
 	state_set "$context" "$namespace" "$migration_id" "OLD_TOTAL_SIZE" "$old_total_bytes"
 	log_info "Old data size: $(human_size "$old_total_bytes")"
