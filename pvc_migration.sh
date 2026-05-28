@@ -609,13 +609,21 @@ discover_new() {
 					log_warn "Multiple deployments match '$migration_id':"
 					echo "$filtered"
 					deploy_new=$(echo "$filtered" | head -1)
-					log_info "Using first match: $deploy_new"
+					log_info "Picked: $deploy_new"
+					if ! confirm "Use this deployment?"; then
+						log_error "Re-run with --deploy to specify the correct deployment."
+						exit 1
+					fi
 				fi
 			else
 				log_warn "Multiple deployments match '$migration_id':"
 				echo "$matches"
 				deploy_new=$(echo "$matches" | head -1)
-				log_info "Using first match: $deploy_new"
+				log_info "Picked: $deploy_new"
+				if ! confirm "Use this deployment?"; then
+					log_error "Re-run with --deploy to specify the correct deployment."
+					exit 1
+				fi
 			fi
 		else
 			deploy_new="$matches"
@@ -655,13 +663,21 @@ discover_new() {
 					log_warn "Multiple PVCs match '$migration_id':"
 					echo "$filtered"
 					pvc_new=$(echo "$filtered" | head -1)
-					log_info "Using first match: $pvc_new"
+					log_info "Picked: $pvc_new"
+					if ! confirm "Use this PVC?"; then
+						log_error "Re-run with --pvc to specify the correct PVC."
+						exit 1
+					fi
 				fi
 			else
 				log_warn "Multiple PVCs match '$migration_id':"
 				echo "$matches"
 				pvc_new=$(echo "$matches" | head -1)
-				log_info "Using first match: $pvc_new"
+				log_info "Picked: $pvc_new"
+				if ! confirm "Use this PVC?"; then
+					log_error "Re-run with --pvc to specify the correct PVC."
+					exit 1
+				fi
 			fi
 		else
 			pvc_new="$matches"
@@ -688,6 +704,15 @@ discover_new() {
 		fi
 	else
 		log_info "New VolumeHandle: $volume_handle_new"
+	fi
+
+	# Save direct NFS info from PV (spec.nfs) if available
+	local nfs_direct_new
+	nfs_direct_new=$(get_nfs_from_pv "$context" "$pv_new") || true
+	if [[ -n "$nfs_direct_new" ]]; then
+		echo "$nfs_direct_new" | while IFS='=' read -r key value; do
+			state_set "$context" "$namespace" "$migration_id" "NEW_${key}" "$value"
+		done
 	fi
 
 	# Write to state
@@ -954,6 +979,46 @@ copy_data() {
 		sleep 3
 	done
 
+	# Parse mount lists (supports both single and multi-mount) — must be before backup
+	local mounts_old_str subpaths_old_str mounts_new_str subpaths_new_str
+	mounts_old_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
+	subpaths_old_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
+	mounts_new_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW" || true)
+	subpaths_new_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
+
+	local mount_old_list=() subpath_old_list=() mount_new_list=() subpath_new_list=()
+	local line
+	while IFS= read -r line; do [[ -n "$line" ]] && mount_old_list+=("$line"); done <<< "$(echo "$mounts_old_str" | sed 's/__/\n/g')"
+	while IFS= read -r line; do subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_old_str" | sed 's/__/\n/g')"
+	while IFS= read -r line; do [[ -n "$line" ]] && mount_new_list+=("$line"); done <<< "$(echo "$mounts_new_str" | sed 's/__/\n/g')"
+	while IFS= read -r line; do subpath_new_list+=("$line"); done <<< "$(echo "$subpaths_new_str" | sed 's/__/\n/g')"
+
+	local mount_count=${#mount_old_list[@]}
+	if [[ "$mount_count" -eq 0 ]]; then
+		# Single mount (legacy state without lists) — use entire NFS paths as-is
+		mount_count=1
+		mount_old_list=("")
+		subpath_old_list=("")
+		mount_new_list=("")
+		subpath_new_list=("")
+	fi
+	# Pad subpath arrays to match mount_count (preserve empty subPaths)
+	while [[ ${#subpath_old_list[@]} -lt "$mount_count" ]]; do subpath_old_list+=(""); done
+	while [[ ${#subpath_new_list[@]} -lt "$mount_count" ]]; do subpath_new_list+=(""); done
+
+	# Print copy plan with mounts
+	echo ""
+	log_info "Copy plan: $mount_count mount(s)"
+	for ((i = 0; i < mount_count; i++)); do
+		local os="${subpath_old_list[$i]}"
+		local ns="${subpath_new_list[$i]}"
+		local src="${nfs_path_old}${os:+${os}/}"
+		local dst="${nfs_path_new}${ns:+${ns}/}"
+		echo "  [$((i+1))] ${mount_old_list[$i]:-<root>}"
+		echo "       Old: $nfs_host_old:$src"
+		echo "       New: $nfs_host_new:$dst"
+	done
+
 	# Optional backup (only if source NFS is still accessible)
 	if $do_backup; then
 		if $source_available; then
@@ -968,7 +1033,7 @@ copy_data() {
 					ssh "$nfs_host_old" "tar -czf '$backup_base/$i.tgz' -C '$src' ." 2>/dev/null || log_warn "Backup failed for mount $((i+1))"
 				done
 				ssh "$nfs_host_old" "echo 'mount_count=$mount_count' > '$backup_base/metadata.env'"
-				log_ok "Backup complete: $nfs_host_old:$backup_base"
+			log_ok "Backup complete: $nfs_host_old:$backup_base"
 			fi
 		else
 			log_warn "Source NFS path does not exist — cannot create backup."
@@ -988,37 +1053,6 @@ copy_data() {
 		fi
 	fi
 
-	# Create destination directory on new NFS
-	log_info "Creating destination directory: $nfs_path_new"
-	ssh "$nfs_host_new" "mkdir -p '$nfs_path_new'" 2>/dev/null || {
-		log_error "Failed to create destination directory on $nfs_host_new"
-		log_error "You may need to create the parent share first."
-		exit 1
-	}
-
-	# Parse mount lists (supports both single and multi-mount)
-	local mounts_old_str subpaths_old_str mounts_new_str subpaths_new_str
-	mounts_old_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
-	subpaths_old_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
-	mounts_new_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW" || true)
-	subpaths_new_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
-
-	local mount_old_list=() subpath_old_list=() mount_new_list=() subpath_new_list=()
-	while IFS= read -r line; do [[ -n "$line" ]] && mount_old_list+=("$line"); done <<< "$(echo "$mounts_old_str" | sed 's/__/\n/g')"
-	while IFS= read -r line; do [[ -n "$line" ]] && subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_old_str" | sed 's/__/\n/g')"
-	while IFS= read -r line; do [[ -n "$line" ]] && mount_new_list+=("$line"); done <<< "$(echo "$mounts_new_str" | sed 's/__/\n/g')"
-	while IFS= read -r line; do [[ -n "$line" ]] && subpath_new_list+=("$line"); done <<< "$(echo "$subpaths_new_str" | sed 's/__/\n/g')"
-
-	local mount_count=${#mount_old_list[@]}
-	if [[ "$mount_count" -eq 0 ]]; then
-		# Single mount (legacy state without lists) — use entire NFS paths as-is
-		mount_count=1
-		mount_old_list=("")
-		subpath_old_list=("")
-		mount_new_list=("")
-		subpath_new_list=("")
-	fi
-
 	# Build tar flags
 	local tar_flags="-cf -"
 	local tar_extract="-xf -"
@@ -1033,19 +1067,6 @@ copy_data() {
 	if command -v pv &>/dev/null; then
 		progress_cmd="pv -trab"
 	fi
-
-	# Print copy plan
-	echo ""
-	log_info "Copy plan: $mount_count mount(s)"
-	for ((i = 0; i < mount_count; i++)); do
-		local os="${subpath_old_list[$i]}"
-		local ns="${subpath_new_list[$i]}"
-		local src="${nfs_path_old}${os:+${os}/}"
-		local dst="${nfs_path_new}${ns:+${ns}/}"
-		echo "  [$((i+1))] ${mount_old_list[$i]:-<root>}"
-		echo "       Old: $nfs_host_old:$src"
-		echo "       New: $nfs_host_new:$dst"
-	done
 
 	# Create all destination directories
 	log_info "Creating destination directories..."
