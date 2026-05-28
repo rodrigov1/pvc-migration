@@ -55,10 +55,8 @@ Subcommands:
     Add --compress for slow links. Shows progress via pv if available.
 
   validate <context> <namespace> <migration-id>
-    Scale up the new deployment, wait for readiness, verify files inside the pod.
-
-  cleanup <context> <namespace> <migration-id>
-    Remove old deployment and notify about old PVC retention.
+    Scale up the new deployment, wait for readiness, verify files inside the pod
+    against old manifests, and print a cleanup assessment.
 
   status <context> <namespace> <migration-id>
     Show current state file contents.
@@ -70,7 +68,6 @@ Examples (retain — no backup needed):
   \$SCRIPT_NAME discover-new prod n8n redis-famaf --deploy redis-famaf
   \$SCRIPT_NAME copy-data prod n8n redis-famaf
   \$SCRIPT_NAME validate prod n8n redis-famaf
-  \$SCRIPT_NAME cleanup prod n8n redis-famaf
 
 Examples (ReclaimPolicy:Delete — backup first):
   \$SCRIPT_NAME discover-old prod nahuel nahuel-java --deploy nahuel-nahuel-java --pvc nahuel-nfs-pvc
@@ -79,7 +76,6 @@ Examples (ReclaimPolicy:Delete — backup first):
   \$SCRIPT_NAME discover-new prod nahuel nahuel-java --deploy nahuel-java
   \$SCRIPT_NAME copy-data prod nahuel nahuel-java
   \$SCRIPT_NAME validate prod nahuel nahuel-java
-  \$SCRIPT_NAME cleanup prod nahuel nahuel-java
 EOF
 	exit 1
 }
@@ -1644,105 +1640,11 @@ validate() {
 	echo ""
 	echo "===== Next steps ====="
 	echo "1. Perform manual functional testing (UI, API, etc.)"
-	echo "2. When satisfied, run: $SCRIPT_NAME cleanup $context $namespace $migration_id"
-}
-
-# ======================================================================
-# SUBCOMMAND: cleanup
-# ======================================================================
-cleanup() {
-	local context="$1" namespace="$2" migration_id="$3"
-
-	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME cleanup <context> <namespace> <migration-id>"
-		exit 1
-	fi
-
-	state_require "$context" "$namespace" "$migration_id"
-
-	local depl_old depl_new pvc_old pv_old pvc_new pv_new
-	depl_old=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD")
-	depl_new=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_NEW")
-	pvc_old=$(state_get "$context" "$namespace" "$migration_id" "PVC_OLD")
-	pv_old=$(state_get "$context" "$namespace" "$migration_id" "PV_OLD")
-	pvc_new=$(state_get "$context" "$namespace" "$migration_id" "PVC_NEW" || true)
-	pv_new=$(state_get "$context" "$namespace" "$migration_id" "PV_NEW" || true)
-
-	# --- Guard: old == new means there's nothing to clean up ---
-	if [[ "$depl_old" == "$depl_new" ]]; then
-		log_warn "Old deployment '$depl_old' is the SAME as the new deployment."
-		log_warn "Nothing to clean up — the migration did not create a separate old deployment."
-		return
-	fi
-
-	# --- Guard: verify old deployment exists ---
-	if ! kubectl get deployment "$depl_old" -n "$namespace" --context="$context" &>/dev/null; then
-		log_warn "Old deployment '$depl_old' no longer exists in the cluster."
-		log_info "Nothing to delete. Marking phase as 'cleaned'."
-		state_set "$context" "$namespace" "$migration_id" "PHASE" "cleaned"
-		return
-	fi
-
-	# Check if old PVC/PV are distinct from new ones (to avoid misleading hints)
-	local same_pvc=false
-	if [[ -n "$pvc_new" && "$pvc_old" == "$pvc_new" ]]; then
-		same_pvc=true
-	fi
-
-	echo ""
-	log_warn "===== CLEANUP ====="
-	echo ""
-	log_warn "This WILL:"
-	echo "  - Delete the OLD deployment: $depl_old"
-	if $same_pvc; then
-		echo "  - Old PVC is the same as new PVC, will NOT retain separately."
-	else
-		echo "  - Retain old PVC (for safety): $pvc_old (-> $pv_old)"
-	fi
-	echo "  - NFS data on OLD backend will NOT be deleted"
-	echo ""
-	log_warn "This will NOT:"
-	echo "  - Delete new resources"
-	if ! $same_pvc; then
-		echo "  - Delete old PVC (you must delete manually when ready)"
-	fi
-	echo ""
-
-	if ! confirm "Are you sure you want to clean up?"; then
-		log_info "Aborted."
-		return
-	fi
-	if ! confirm "REALLY delete deployment $depl_old?"; then
-		log_info "Aborted."
-		return
-	fi
-
-	log_info "Deleting old deployment $depl_old ..."
-	kubectl delete deployment "$depl_old" -n "$namespace" --context="$context" --wait=true 2>/dev/null || {
-		log_error "Failed to delete deployment $depl_old"
-		exit 1
-	}
-
-	log_ok "Old deployment deleted."
-
-	if ! $same_pvc; then
-		echo ""
-		log_warn "The following old resources still exist and should be reviewed manually:"
-		echo "  - PVC: $pvc_old (namespace: $namespace)"
-		echo "  - PV: $pv_old"
-		echo "  - NFS data on old backend"
-		echo ""
-		log_info "To delete the old PVC when ready:"
-		echo "  kubectl delete pvc $pvc_old -n $namespace --context=$context"
-		echo ""
-		log_info "To delete the old PV (only after PVC is deleted):"
-		echo "  kubectl delete pv $pv_old --context=$context"
-		echo ""
-	fi
-
-	state_set "$context" "$namespace" "$migration_id" "PHASE" "cleaned"
-
-	log_ok "Cleanup complete for $migration_id in $context/$namespace"
+	echo "2. If everything works, clean up old resources (see PV Cleanup Assessment above)"
+	echo "   - Old PVC: kubectl delete pvc \$PVC_OLD -n \$NAMESPACE --context=\$CONTEXT"
+	echo "   - Old PV:  kubectl delete pv \$PV_OLD --context=\$CONTEXT"
+	echo "   - Backup tarballs: ssh \$NFS_HOST \"rm -rf \$(dirname \$NFS_PATH)/<migration-id>-backup/\""
+	echo "3. Or repurpose the old NFS path if no longer needed"
 }
 
 # ======================================================================
@@ -1801,9 +1703,6 @@ copy-data | copy_data)
 	;;
 validate)
 	validate "$@"
-	;;
-cleanup)
-	cleanup "$@"
 	;;
 status)
 	show_status "$@"
