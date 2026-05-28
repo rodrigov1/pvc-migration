@@ -507,7 +507,7 @@ discover_old() {
 				mnt_idx=$((mnt_idx + 1))
 				local per_mount_manifest="${manifest_base}.${mnt_idx}"
 				capture_file_manifest "$context" "$namespace" "$pod_name" "$single_mount" "$per_mount_manifest" 2>/dev/null || true
-			done <<< "$(echo "$mounts_str" | tr '__' '\n')"
+			done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
 		fi
 	else
 		log_info "No running pod — capturing combined NFS manifest (needed for validate)."
@@ -1004,10 +1004,10 @@ copy_data() {
 	subpaths_new_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
 
 	local mount_old_list=() subpath_old_list=() mount_new_list=() subpath_new_list=()
-	while IFS= read -r line; do [[ -n "$line" ]] && mount_old_list+=("$line"); done <<< "$(echo "$mounts_old_str" | tr '__' '\n')"
-	while IFS= read -r line; do [[ -n "$line" ]] && subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_old_str" | tr '__' '\n')"
-	while IFS= read -r line; do [[ -n "$line" ]] && mount_new_list+=("$line"); done <<< "$(echo "$mounts_new_str" | tr '__' '\n')"
-	while IFS= read -r line; do [[ -n "$line" ]] && subpath_new_list+=("$line"); done <<< "$(echo "$subpaths_new_str" | tr '__' '\n')"
+	while IFS= read -r line; do [[ -n "$line" ]] && mount_old_list+=("$line"); done <<< "$(echo "$mounts_old_str" | sed 's/__/\n/g')"
+	while IFS= read -r line; do [[ -n "$line" ]] && subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_old_str" | sed 's/__/\n/g')"
+	while IFS= read -r line; do [[ -n "$line" ]] && mount_new_list+=("$line"); done <<< "$(echo "$mounts_new_str" | sed 's/__/\n/g')"
+	while IFS= read -r line; do [[ -n "$line" ]] && subpath_new_list+=("$line"); done <<< "$(echo "$subpaths_new_str" | sed 's/__/\n/g')"
 
 	local mount_count=${#mount_old_list[@]}
 	if [[ "$mount_count" -eq 0 ]]; then
@@ -1327,7 +1327,7 @@ validate() {
 			fi
 			rm -f "$manifest_new"
 		fi
-	done <<< "$(echo "$mounts_str" | tr '__' '\n')"
+	done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
 
 	if [[ -n "$mounts_str" ]]; then
 		if $manifests_all_match; then
