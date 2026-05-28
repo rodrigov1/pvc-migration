@@ -436,89 +436,105 @@ discover_old() {
 		done
 	fi
 
-	# Find the volume name from the PVC to look up mount info
-	local vol_name
-	vol_name=$pvc_old
-	# The volume name in the deployment might differ from PVC name.
-	# Let's find it via the deployment spec
-	local mount_info mount_path subpath
-	mount_info=$(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
-		-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[*]}{.name}|{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null) || true
+	# Find the volume name from the PVC and capture ALL volume mounts
+	local claim_name vol_in_deploy
+	claim_name="$pvc_old"
+	vol_in_deploy=$(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
+		-o jsonpath="{range .spec.template.spec.volumes[?(@.persistentVolumeClaim.claimName=='$claim_name')]}{.name}{'\n'}{end}" 2>/dev/null) || true
 
-	if [[ -n "$mount_info" ]]; then
-		# Pick the volume mount that matches our PVC's claim name
-		local claim_name
-		claim_name="$pvc_old"
-		local vol_in_deploy
-		vol_in_deploy=$(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
-			-o jsonpath="{range .spec.template.spec.volumes[?(@.persistentVolumeClaim.claimName=='$claim_name')]}{.name}{'\n'}{end}" 2>/dev/null) || true
+	if [[ -n "$vol_in_deploy" ]]; then
+		log_info "Found volume in deployment: $vol_in_deploy"
+		# Clear previous mount data (for re-discover)
+		state_del "$context" "$namespace" "$migration_id" "MOUNT_OLD"
+		state_del "$context" "$namespace" "$migration_id" "SUBPATH_OLD"
 
-		if [[ -n "$vol_in_deploy" ]]; then
-			mount_info=$(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
-				-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_in_deploy')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null) || true
-			if [[ -n "$mount_info" ]]; then
-				mount_path=$(echo "$mount_info" | cut -d'|' -f1 | tr -d '@')
-				subpath=$(echo "$mount_info" | cut -d'|' -f2)
-				log_info "Mount path: $mount_path"
-				log_info "SubPath: ${subpath:-<none>}"
+		# Iterate over ALL volume mounts for this volume (a PVC can have multiple mounts with different subPaths)
+		local mount_idx=0 raw_mount raw_subpath
+		while IFS='|' read -r raw_mount raw_subpath; do
+			local mount_path="${raw_mount#@}"
+			[[ -z "$mount_path" ]] && continue
+			mount_idx=$((mount_idx + 1))
+			log_info "Mount $mount_idx: $mount_path (subPath: ${raw_subpath:-<none>})"
+			state_append "$context" "$namespace" "$migration_id" "MOUNT_OLD" "$mount_path"
+			state_append "$context" "$namespace" "$migration_id" "SUBPATH_OLD" "${raw_subpath:-}"
+		done < <(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
+			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_in_deploy')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null || true)
 
-				state_set "$context" "$namespace" "$migration_id" "MOUNT_OLD" "$mount_path"
-				state_set "$context" "$namespace" "$migration_id" "SUBPATH_OLD" "${subpath:-}"
-			fi
+		if [[ "$mount_idx" -eq 0 ]]; then
+			log_warn "No volume mounts found for volume $vol_in_deploy"
+		else
+			log_info "Total mounts captured: $mount_idx"
+		fi
+	else
+		log_warn "Could not find volume name for PVC $pvc_old in deployment $deploy_old"
+		# Fallback: try to find any mount that references this PVC
+		local fallback_mount
+		fallback_mount=$(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
+			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$pvc_old')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null | head -1) || true
+		if [[ -n "$fallback_mount" ]]; then
+			local fb_path="${fallback_mount%%|*}"
+			fb_path="${fb_path#@}"
+			log_info "Fallback mount: $fb_path"
+			state_set "$context" "$namespace" "$migration_id" "MOUNT_OLD" "$fb_path"
 		fi
 	fi
 
-	# Build the NFS path
-	local nfs_host nfs_share_base pv_uid subpath_val nfs_path_old
+	# Build the NFS path (always PV root — subpaths appended per-mount during copy)
+	local nfs_host nfs_share_base pv_uid nfs_path_old
 	nfs_host=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST" || true)
 	nfs_share_base=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_SHARE_BASE" || true)
 	pv_uid=$(state_get "$context" "$namespace" "$migration_id" "OLD_PV_UID" || true)
-	subpath_val=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
 
 	if [[ -n "$nfs_host" && -n "$nfs_share_base" && -n "$pv_uid" ]]; then
-		if [[ -n "$subpath_val" ]]; then
-			nfs_path_old="${nfs_share_base}/${pv_uid}/${subpath_val}/"
-		else
-			nfs_path_old="${nfs_share_base}/${pv_uid}/"
-		fi
+		nfs_path_old="${nfs_share_base}/${pv_uid}/"
 		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_OLD" "$nfs_path_old"
-		log_ok "Old NFS path: $nfs_host:$nfs_path_old"
+		log_ok "Old NFS path (PV root): $nfs_host:$nfs_path_old"
 	else
 		log_warn "Could not construct NFS path. Set NFS_PATH_OLD manually."
 		log_info "  nfs_host=$nfs_host"
 		log_info "  nfs_share_base=$nfs_share_base"
 		log_info "  pv_uid=$pv_uid"
-		log_info "  subpath=$subpath_val"
 	fi
 
-	# Capture file manifest via NFS (preferred) or from running pod (fallback)
-	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]]; then
-		local manifest_file
-		manifest_file="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-		if ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
-			capture_file_manifest_nfs "$nfs_host" "$nfs_path_old" "$manifest_file" || true
-		else
-			log_warn "NFS path not accessible via SSH: $nfs_host:$nfs_path_old"
-		fi
-	fi
-	# Fallback: capture manifest from running pod
-	if [[ ! -f "$manifest_file" ]]; then
-		local manifest_file
-		manifest_file="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-		local pod_name mount_path
-		mount_path=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
-		pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
-		if [[ -n "$pod_name" && -n "$mount_path" ]]; then
-			capture_file_manifest "$context" "$namespace" "$pod_name" "$mount_path" "$manifest_file" || true
-		else
-			log_info "No running pod available to capture manifest (pod may be scaled down)."
+	# Capture file manifests — NFS root (combined) if accessible, else per-mount via pod
+	local manifest_base="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
+	local nfs_manifest_ok=false
+	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
+		if capture_file_manifest_nfs "$nfs_host" "$nfs_path_old" "$manifest_base" 2>/dev/null; then
+			nfs_manifest_ok=true
+			log_info "Combined NFS manifest saved (PV root)"
 		fi
 	fi
 
-	# Compute total size from manifest or NFS
-	local old_total_bytes
-	if [[ -f "$manifest_file" ]]; then
-		old_total_bytes=$(compute_total_size_manifest "$manifest_file")
+	# Per-mount manifests from running pod (fallback or complement)
+	local pod_name
+	pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
+	if [[ -n "$pod_name" ]]; then
+		local mounts_str mnt_idx=0
+		mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
+		if [[ -n "$mounts_str" ]]; then
+			while IFS= read -r single_mount; do
+				[[ -z "$single_mount" ]] && continue
+				mnt_idx=$((mnt_idx + 1))
+				local per_mount_manifest="${manifest_base}.${mnt_idx}"
+				capture_file_manifest "$context" "$namespace" "$pod_name" "$single_mount" "$per_mount_manifest" 2>/dev/null || true
+			done <<< "$(echo "$mounts_str" | tr '__' '\n')"
+		fi
+	else
+		log_info "No running pod available for per-mount manifest capture."
+	fi
+
+	# Compute total size from NFS root (most accurate) or fallback to per-mount sums
+	local old_total_bytes=0
+	if $nfs_manifest_ok; then
+		old_total_bytes=$(compute_total_size_manifest "$manifest_base")
+	elif [[ -f "${manifest_base}.1" ]]; then
+		for mf in "$manifest_base".*; do
+			[[ "$mf" == *".md5" ]] && continue
+			local sz
+			sz=$(compute_total_size_manifest "$mf")
+			old_total_bytes=$((old_total_bytes + sz))
+		done
 	else
 		old_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_old")
 	fi
@@ -700,40 +716,40 @@ discover_new() {
 		fi
 	fi
 
-	# Find mount info from new deployment
-	local claim_name vol_in_deploy mount_info mount_path subpath
+	# Find mount info from new deployment — capture ALL volume mounts
+	local claim_name vol_in_deploy
 	claim_name="$pvc_new"
 	vol_in_deploy=$(kubectl get deployment "$deploy_new" -n "$namespace" --context="$context" \
 		-o jsonpath="{range .spec.template.spec.volumes[?(@.persistentVolumeClaim.claimName=='$claim_name')]}{.name}{'\n'}{end}" 2>/dev/null) || true
 
 	if [[ -n "$vol_in_deploy" ]]; then
-		mount_info=$(kubectl get deployment "$deploy_new" -n "$namespace" --context="$context" \
-			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_in_deploy')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null) || true
-		if [[ -n "$mount_info" ]]; then
-			mount_path=$(echo "$mount_info" | cut -d'|' -f1 | tr -d '@')
-			subpath=$(echo "$mount_info" | cut -d'|' -f2)
-			log_info "New mount path: $mount_path"
-			log_info "New SubPath: ${subpath:-<none>}"
-			state_set "$context" "$namespace" "$migration_id" "MOUNT_NEW" "$mount_path"
-			state_set "$context" "$namespace" "$migration_id" "SUBPATH_NEW" "${subpath:-}"
-		fi
+		state_del "$context" "$namespace" "$migration_id" "MOUNT_NEW"
+		state_del "$context" "$namespace" "$migration_id" "SUBPATH_NEW"
+
+		local mount_idx=0 raw_mount raw_subpath
+		while IFS='|' read -r raw_mount raw_subpath; do
+			local mount_path="${raw_mount#@}"
+			[[ -z "$mount_path" ]] && continue
+			mount_idx=$((mount_idx + 1))
+			log_info "New mount $mount_idx: $mount_path (subPath: ${raw_subpath:-<none>})"
+			state_append "$context" "$namespace" "$migration_id" "MOUNT_NEW" "$mount_path"
+			state_append "$context" "$namespace" "$migration_id" "SUBPATH_NEW" "${raw_subpath:-}"
+		done < <(kubectl get deployment "$deploy_new" -n "$namespace" --context="$context" \
+			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_in_deploy')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null || true)
+	else
+		log_warn "Could not find volume name for PVC $pvc_new in deployment $deploy_new"
 	fi
 
-	# Build NFS path
+	# Build NFS path (always PV root — subpaths appended per-mount during copy)
 	local nfs_host nfs_share_base pv_uid nfs_path_new
 	nfs_host=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_HOST" || true)
 	nfs_share_base=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_SHARE_BASE" || true)
 	pv_uid=$(state_get "$context" "$namespace" "$migration_id" "NEW_PV_UID" || true)
-	subpath=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
 
 	if [[ -n "$nfs_host" && -n "$nfs_share_base" && -n "$pv_uid" ]]; then
-		if [[ -n "$subpath" ]]; then
-			nfs_path_new="${nfs_share_base}/${pv_uid}/${subpath}/"
-		else
-			nfs_path_new="${nfs_share_base}/${pv_uid}/"
-		fi
+		nfs_path_new="${nfs_share_base}/${pv_uid}/"
 		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_NEW" "$nfs_path_new"
-		log_ok "New NFS path: $nfs_host:$nfs_path_new"
+		log_ok "New NFS path (PV root): $nfs_host:$nfs_path_new"
 	else
 		log_warn "Could not construct new NFS path. Set NFS_PATH_NEW manually."
 	fi
@@ -815,6 +831,10 @@ copy_data() {
 	nfs_host_new=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_HOST")
 	nfs_path_new=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_NEW")
 
+	# Backup directory (at share level, outside PV path)
+	local backup_base
+	backup_base="$(dirname "$nfs_path_old")/${migration_id}-backup"
+
 	# Validate required fields
 	local missing=false
 	for var in depl_old depl_new nfs_host_old nfs_path_old nfs_host_new nfs_path_new; do
@@ -837,14 +857,21 @@ copy_data() {
 	echo ""
 
 	# Verify SSH access to both NFS hosts
+	local source_available=false
 	log_info "Verifying SSH access to old NFS host: $nfs_host_old ..."
-	if ! ssh "$nfs_host_old" "test -d '$nfs_path_old'" 2>/dev/null; then
-		log_warn "Old NFS path not accessible via SSH: $nfs_host_old:$nfs_path_old"
-		log_warn "Contents of parent directory:"
-		ssh "$nfs_host_old" "ls -lah '$(dirname "$nfs_path_old")'" 2>/dev/null || log_error "Cannot access old NFS at all."
-		if ! confirm "Continue anyway?"; then
-			log_info "Aborted."
-			return
+	if ssh "$nfs_host_old" "test -d '$nfs_path_old'" 2>/dev/null; then
+		source_available=true
+	else
+		log_warn "Old NFS path not accessible: $nfs_host_old:$nfs_path_old"
+		if ssh "$nfs_host_old" "test -d '$backup_base'" 2>/dev/null; then
+			log_info "But backup dir exists at $backup_base — will restore from backup."
+		else
+			log_warn "Contents of parent directory:"
+			ssh "$nfs_host_old" "ls -lah '$(dirname "$nfs_path_old")'" 2>/dev/null || log_error "Cannot access old NFS at all."
+			if ! confirm "Continue anyway (copy will fail without source or backup)?"; then
+				log_info "Aborted."
+				return
+			fi
 		fi
 	fi
 
@@ -935,13 +962,37 @@ copy_data() {
 		sleep 3
 	done
 
-	# Optional backup
+	# Optional backup (only if source NFS is still accessible)
 	if $do_backup; then
-		local backup_file="/tmp/${namespace}-${migration_id}-pre-migracion.tgz"
-		log_info "Creating backup: $backup_file"
-		if confirm "Create backup tarball on $nfs_host_old?"; then
-			ssh "$nfs_host_old" "tar -czf '$backup_file' -C '$nfs_path_old' ." 2>/dev/null || log_warn "Backup failed (continuing)"
-			log_ok "Backup created: $nfs_host_old:$backup_file"
+		if $source_available; then
+			log_info "Creating backup at $nfs_host_old:$backup_base ..."
+			if confirm "Create backup on $nfs_host_old?"; then
+				ssh "$nfs_host_old" "mkdir -p '$backup_base'"
+				ssh "$nfs_host_old" "rm -f '$backup_base'/*.tgz"
+				for ((i = 0; i < mount_count; i++)); do
+					local os="${subpath_old_list[$i]}"
+					local src="${nfs_path_old}${os:+${os}/}"
+					log_info "  Backing up mount $((i+1)): $src"
+					ssh "$nfs_host_old" "tar -czf '$backup_base/$i.tgz' -C '$src' ." 2>/dev/null || log_warn "Backup failed for mount $((i+1))"
+				done
+				ssh "$nfs_host_old" "echo 'mount_count=$mount_count' > '$backup_base/metadata.env'"
+				log_ok "Backup complete: $nfs_host_old:$backup_base"
+			fi
+		else
+			log_warn "Source NFS path does not exist — cannot create backup."
+			log_info "If a backup already exists at $backup_base, it will be used for restore."
+		fi
+	fi
+
+	# Determine copy mode: source or restore
+	local restore_mode=false
+	if ! $source_available; then
+		if ssh "$nfs_host_old" "test -d '$backup_base'" 2>/dev/null; then
+			log_info "Will restore from backup at $backup_base"
+			restore_mode=true
+		else
+			log_error "No source NFS path and no backup available at $backup_base"
+			exit 1
 		fi
 	fi
 
@@ -953,7 +1004,30 @@ copy_data() {
 		exit 1
 	}
 
-	# Build tar flags (no compress by default)
+	# Parse mount lists (supports both single and multi-mount)
+	local mounts_old_str subpaths_old_str mounts_new_str subpaths_new_str
+	mounts_old_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
+	subpaths_old_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
+	mounts_new_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW" || true)
+	subpaths_new_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
+
+	local mount_old_list=() subpath_old_list=() mount_new_list=() subpath_new_list=()
+	while IFS= read -r line; do [[ -n "$line" ]] && mount_old_list+=("$line"); done <<< "$(echo "$mounts_old_str" | tr '__' '\n')"
+	while IFS= read -r line; do [[ -n "$line" ]] && subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_old_str" | tr '__' '\n')"
+	while IFS= read -r line; do [[ -n "$line" ]] && mount_new_list+=("$line"); done <<< "$(echo "$mounts_new_str" | tr '__' '\n')"
+	while IFS= read -r line; do [[ -n "$line" ]] && subpath_new_list+=("$line"); done <<< "$(echo "$subpaths_new_str" | tr '__' '\n')"
+
+	local mount_count=${#mount_old_list[@]}
+	if [[ "$mount_count" -eq 0 ]]; then
+		# Single mount (legacy state without lists) — use entire NFS paths as-is
+		mount_count=1
+		mount_old_list=("")
+		subpath_old_list=("")
+		mount_new_list=("")
+		subpath_new_list=("")
+	fi
+
+	# Build tar flags
 	local tar_flags="-cf -"
 	local tar_extract="-xf -"
 	local copy_label="tar-pipe (no compression)"
@@ -963,93 +1037,182 @@ copy_data() {
 		copy_label="tar-pipe (gzip compressed)"
 	fi
 
-	# Build progress pipe
 	local progress_cmd="cat"
 	if command -v pv &>/dev/null; then
 		progress_cmd="pv -trab"
 	fi
 
-	# Copy data
+	# Print copy plan
 	echo ""
-	log_info "Starting data copy from $nfs_host_old to $nfs_host_new ..."
-	log_info "Command: $copy_label, progress: $([ "$progress_cmd" = "cat" ] && echo "no pv" || echo "pv")"
+	log_info "Copy plan: $mount_count mount(s)"
+	for ((i = 0; i < mount_count; i++)); do
+		local os="${subpath_old_list[$i]}"
+		local ns="${subpath_new_list[$i]}"
+		local src="${nfs_path_old}${os:+${os}/}"
+		local dst="${nfs_path_new}${ns:+${ns}/}"
+		echo "  [$((i+1))] ${mount_old_list[$i]:-<root>}"
+		echo "       Old: $nfs_host_old:$src"
+		echo "       New: $nfs_host_new:$dst"
+	done
 
-	if ! confirm "Execute the copy now?"; then
-		log_info "Aborted. NFS paths are still scaled down."
-		log_info "Manual copy command:"
-		echo "  ssh $nfs_host_old \"tar $tar_flags -C '$nfs_path_old' .\" | $progress_cmd | ssh $nfs_host_new \"tar $tar_extract -C '$nfs_path_new'\""
+	# Create all destination directories
+	log_info "Creating destination directories..."
+	for ((i = 0; i < mount_count; i++)); do
+		local ns="${subpath_new_list[$i]}"
+		local dst="${nfs_path_new}${ns:+${ns}/}"
+		ssh "$nfs_host_new" "mkdir -p '$dst'" 2>/dev/null || {
+			log_error "Failed to create directory: $dst"
+			exit 1
+		}
+	done
+
+	local confirm_msg="Proceed with data copy?"
+	if $restore_mode; then
+		confirm_msg="Proceed with data restore from backup?"
+	fi
+	if ! confirm "$confirm_msg"; then
+		log_info "Aborted."
 		return
+	fi
+
+	# Generate temp copy script
+	local tmp_script="/tmp/pvc-mig-${migration_id}-$$.sh"
+	{
+		echo '#!/bin/bash'
+		echo 'set -euo pipefail'
+		echo ''
+		echo "nfs_host_old='$nfs_host_old'"
+		echo "nfs_host_new='$nfs_host_new'"
+		echo "nfs_path_old='$nfs_path_old'"
+		echo "nfs_path_new='$nfs_path_new'"
+		echo "backup_base='$backup_base'"
+		echo "restore_mode=$restore_mode"
+		echo "tar_flags='$tar_flags'"
+		echo "tar_extract='$tar_extract'"
+		echo "progress_cmd='$progress_cmd'"
+		echo "mount_count=$mount_count"
+		echo ''
+
+		# Mount-specific variables as arrays
+		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do echo -n "'$v' "; done))"
+		echo "subpath_new_list=($(for v in "${subpath_new_list[@]}"; do echo -n "'$v' "; done))"
+
+		echo ''
+		echo 'for ((i = 0; i < mount_count; i++)); do'
+		echo '  old_sub="${subpath_old_list[$i]}"'
+		echo '  new_sub="${subpath_new_list[$i]}"'
+		echo '  src="${nfs_path_old}${old_sub:+${old_sub}/}"'
+		echo '  dst="${nfs_path_new}${new_sub:+${new_sub}/}"'
+		echo '  echo ""'
+		if $restore_mode; then
+			echo '  echo "[Mount $((i+1))/$mount_count] Restoring from backup ..."'
+			echo '  echo "  backup:${backup_base}/${i}.tgz -> $dst"'
+			echo '  if ! ssh "$nfs_host_old" "cat '\''${backup_base}/${i}.tgz'\''" | eval "$progress_cmd" | ssh "$nfs_host_new" "tar -xzf - -C \"$dst\""; then'
+		else
+			echo '  echo "[Mount $((i+1))/$mount_count] Copying ..."'
+			echo '  echo "  $src -> $dst"'
+			echo '  if ! ssh "$nfs_host_old" "tar $tar_flags -C \"$src\" ." | eval "$progress_cmd" | ssh "$nfs_host_new" "tar $tar_extract -C \"$dst\""; then'
+		fi
+		echo '    echo "[ERROR] Copy failed for mount $((i+1))"'
+		echo '    exit 1'
+		echo '  fi'
+		echo '  echo "[Mount $((i+1))/$mount_count] Complete."'
+		echo 'done'
+		echo ''
+		echo 'echo ""'
+		echo 'echo "===== Verification ====="'
+		echo 'all_ok=true'
+		echo 'total_old=0 total_new=0'
+		echo 'for ((i = 0; i < mount_count; i++)); do'
+		echo '  old_sub="${subpath_old_list[$i]}"'
+		echo '  new_sub="${subpath_new_list[$i]}"'
+		echo '  src="${nfs_path_old}${old_sub:+${old_sub}/}"'
+		echo '  dst="${nfs_path_new}${new_sub:+${new_sub}/}"'
+		echo '  echo "[Mount $((i+1))/$mount_count] Verifying ..."'
+		if $restore_mode; then
+			echo '  old_c=$(ssh "$nfs_host_old" "tar -tzf '\''${backup_base}/${i}.tgz'\'' 2>/dev/null | grep -c -v '\''/$'\'' 2>/dev/null || echo 0")'
+		else
+			echo '  old_c=$(ssh "$nfs_host_old" "find \"$src\" -type f 2>/dev/null | wc -l" || echo "0")'
+		fi
+		echo '  new_c=$(ssh "$nfs_host_new" "find \"$dst\" -type f 2>/dev/null | wc -l" || echo "0")'
+		echo '  total_old=$((total_old + old_c))'
+		echo '  total_new=$((total_new + new_c))'
+		echo '  echo "  File count: backup/old=$old_c new=$new_c"'
+		echo '  if [[ "$old_c" != "$new_c" ]]; then'
+		echo '    echo "  [WARN] Count mismatch"; all_ok=false'
+		echo '  else'
+		echo '    echo "  [OK] Count matches"'
+		echo '  fi'
+		if ! $restore_mode; then
+			# md5 comparison only when old source is available
+			echo '  old_md5_list=$(ssh "$nfs_host_old" "find \"$src\" -type f -exec md5sum {} + 2>/dev/null" || true)'
+			echo '  new_md5_list=$(ssh "$nfs_host_new" "find \"$dst\" -type f -exec md5sum {} + 2>/dev/null" || true)'
+			echo '  old_md5=$(echo "$old_md5_list" | awk "{print \$1}" | sort | md5sum)'
+			echo '  new_md5=$(echo "$new_md5_list" | awk "{print \$1}" | sort | md5sum)'
+			echo '  if [[ -n "$old_md5" && -n "$new_md5" ]]; then'
+			echo '    if [[ "$old_md5" == "$new_md5" ]]; then'
+			echo '      echo "  [OK] md5 match"'
+			echo '    else'
+			echo '      echo "  [WARN] md5 differ"; all_ok=false'
+			echo '    fi'
+			echo '  fi'
+		else
+			echo '  echo "  [INFO] md5 check skipped (restore mode)"'
+		fi
+		echo 'done'
+		echo 'echo ""'
+		echo 'echo "Total file count: backup/old=$total_old new=$total_new"'
+		echo 'if [[ "$total_old" == "$total_new" ]]; then echo "[OK] Total matches"; else echo "[WARN] Total mismatch"; all_ok=false; fi'
+		echo 'echo ""'
+		echo 'if $all_ok; then echo "[OK] All mounts verified successfully."; else echo "[WARN] Some checks failed."; fi'
+		echo 'echo "Copy completed at $(date -Iseconds)"'
+	} > "$tmp_script"
+	chmod +x "$tmp_script"
+
+	# Decide: tmux, screen, or inline
+	local use_persistent=false
+	local term_cmd=""
+	if command -v tmux &>/dev/null; then
+		if confirm_default_yes "Use tmux session (survives SSH disconnects)?"; then
+			use_persistent=true; term_cmd="tmux"
+		fi
+	elif command -v screen &>/dev/null; then
+		if confirm_default_yes "Use screen session (survives SSH disconnects)?"; then
+			use_persistent=true; term_cmd="screen"
+		fi
 	fi
 
 	local start_time end_time elapsed
 	start_time=$(date +%s)
 
-	# Copy via tar-pipe
-	if ! ssh "$nfs_host_old" "tar $tar_flags -C '$nfs_path_old' ." | $progress_cmd | ssh "$nfs_host_new" "tar $tar_extract -C '$nfs_path_new'"; then
-		log_error "Data copy failed!"
-		log_error "Check SSH connectivity and NFS paths."
-		log_error "Old: ssh $nfs_host_old ls -lah '$nfs_path_old'"
-		log_error "New: ssh $nfs_host_new ls -lah '$nfs_path_new'"
-		exit 1
+	if $use_persistent; then
+		local session_name="pvc-mig-${migration_id}"
+		if [[ "$term_cmd" == "tmux" ]]; then
+			tmux new-session -d -s "$session_name" "$tmp_script"
+			log_info "tmux session '${session_name}' started"
+			log_info "  Attach: tmux attach -t ${session_name}"
+			log_info "  Session auto-closes on completion."
+			while tmux has-session -t "$session_name" 2>/dev/null; do sleep 5; done
+		else
+			screen -dmS "$session_name" bash "$tmp_script"
+			log_info "screen session '${session_name}' started"
+			log_info "  Attach: screen -r ${session_name}"
+			while screen -list 2>/dev/null | grep -q "$session_name"; do sleep 5; done
+		fi
+	else
+		log_info "Starting copy (inline)..."
+		bash "$tmp_script"
 	fi
 
 	end_time=$(date +%s)
 	elapsed=$((end_time - start_time))
+	rm -f "$tmp_script"
+
 	log_ok "Data copy completed in ${elapsed}s"
-
-	# Verify copy
-	echo ""
-	log_info "Verifying copy: file count and sizes..."
-
-	local old_count new_count2
-	old_count=$(ssh "$nfs_host_old" "find '$nfs_path_old' -type f | wc -l" 2>/dev/null || echo "0")
-	new_count2=$(ssh "$nfs_host_new" "find '$nfs_path_new' -type f | wc -l" 2>/dev/null || echo "0")
-
-	log_info "Old file count: $old_count"
-	log_info "New file count: $new_count2"
-
-	if [[ "$old_count" != "$new_count2" ]]; then
-		log_warn "File count mismatch! Old=$old_count New=$new_count2"
-	else
-		log_ok "File count matches."
-	fi
-
-	# Verify md5 (compare hashes only, paths differ between old and new NFS backends)
-	log_info "Computing md5 sums..."
-	local old_md5 new_md5
-	old_md5=$(ssh "$nfs_host_old" "find '$nfs_path_old' -type f -exec md5sum {} \; | awk '{print \$1}' | sort | md5sum" 2>/dev/null || echo "")
-	new_md5=$(ssh "$nfs_host_new" "find '$nfs_path_new' -type f -exec md5sum {} \; | awk '{print \$1}' | sort | md5sum" 2>/dev/null || echo "")
-
-	if [[ -n "$old_md5" && -n "$new_md5" ]]; then
-		if [[ "$old_md5" == "$new_md5" ]]; then
-			log_ok "md5 checksums MATCH."
-		else
-			log_warn "md5 checksums DIFFER!"
-			log_warn "Old aggregate md5: $old_md5"
-			log_warn "New aggregate md5: $new_md5"
-		fi
-	else
-		log_warn "Could not compute md5 sums (one side may be empty)."
-	fi
-
-	# Check uid:gid and permissions (compare mode+uid+gid only, paths differ between NFS hosts)
-	log_info "Checking permissions (mode, uid, gid)..."
-	local old_perm new_perm
-	old_perm=$(ssh "$nfs_host_old" "find '$nfs_path_old' -type f -exec ls -ln {} \; | awk '{print \$1, \$3, \$4}' | sort" 2>/dev/null || true)
-	new_perm=$(ssh "$nfs_host_new" "find '$nfs_path_new' -type f -exec ls -ln {} \; | awk '{print \$1, \$3, \$4}' | sort" 2>/dev/null || true)
-
-	if [[ "$old_perm" == "$new_perm" ]]; then
-		log_ok "Permissions match."
-	else
-		log_warn "Permissions differ:"
-		diff <(echo "$old_perm") <(echo "$new_perm") || true
-	fi
 
 	# Record copy in state
 	state_set "$context" "$namespace" "$migration_id" "PHASE" "copied"
 	state_set "$context" "$namespace" "$migration_id" "COPY_TIMESTAMP" "$(date -Iseconds)"
-	state_set "$context" "$namespace" "$migration_id" "COPY_FILE_COUNT_OLD" "$old_count"
-	state_set "$context" "$namespace" "$migration_id" "COPY_FILE_COUNT_NEW" "$new_count2"
 
 	echo ""
 	log_ok "copy-data complete for $migration_id in $context/$namespace"
@@ -1119,40 +1282,66 @@ validate() {
 	kubectl logs "$pod_name" -n "$namespace" --context="$context" --tail=20 2>/dev/null ||
 		log_warn "Could not fetch logs (kubelet may be unavailable)."
 
-	# Verify files inside the pod
-	if [[ -n "$mount_new" ]]; then
+	# Verify files inside the pod — iterate over ALL mounts
+	local manifest_base="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
+	local mounts_str manifests_all_match=true
+	mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW" || true)
+	if [[ -z "$mounts_str" ]]; then
+		# Legacy single mount
+		mounts_str="$mount_new"
+	fi
+
+	local mnt_idx=0
+	while IFS= read -r single_mount; do
+		[[ -z "$single_mount" ]] && continue
+		mnt_idx=$((mnt_idx + 1))
 		echo ""
-		log_info "Checking files in pod at $mount_new ..."
+		log_info "Checking mount $mnt_idx: $single_mount ..."
 
 		# List files
 		if ! kubectl exec "$pod_name" -n "$namespace" --context="$context" -- \
-			ls -lah "$mount_new" 2>/dev/null; then
-			log_warn "kubectl exec failed (transient error)."
-			log_warn "Check manually: kubectl exec -n $namespace --context=$context $pod_name -- ls -lah $mount_new"
+			ls -lah "$single_mount" 2>/dev/null; then
+			log_warn "kubectl exec failed for $single_mount"
+			log_warn "Check manually: kubectl exec -n $namespace --context=$context $pod_name -- ls -lah $single_mount"
 		fi
 
-		# Compare with old manifest if available
-		local manifest_old
-		manifest_old="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-		if [[ -f "$manifest_old" ]]; then
+		# Compare with per-mount old manifest (numbered) or combined (legacy single-mount)
+		local manifest_old="${manifest_base}.${mnt_idx}"
+		if [[ ! -f "$manifest_old" ]]; then
+			if [[ -f "$manifest_base" && ! -f "${manifest_base}.1" ]]; then
+				manifest_old="$manifest_base"
+			else
+				manifest_old=""
+			fi
+		fi
+		if [[ -n "$manifest_old" && -f "$manifest_old" ]]; then
 			echo ""
-			log_info "Comparing with old file manifest..."
+			log_info "Comparing with old manifest ${manifest_old##*/}..."
 			local manifest_new
 			manifest_new=$(mktemp)
-			local base_path="${mount_new%/}/"
+			local base_path="${single_mount%/}/"
 			if kubectl exec "$pod_name" -n "$namespace" --context="$context" -- \
-				find "$mount_new" -type f -exec ls -ln {} \; 2>/dev/null |
+				find "$single_mount" -type f -exec ls -ln {} \; 2>/dev/null |
 				strip_path_prefix "$base_path" >"$manifest_new" 2>/dev/null; then
 				if diff <(sort "$manifest_old") <(sort "$manifest_new") &>/dev/null; then
-					log_ok "Files in pod match old manifest."
+					log_ok "Files match old manifest."
 				else
 					log_warn "Files differ from old manifest:"
 					diff <(sort "$manifest_old") <(sort "$manifest_new") || true
+					manifests_all_match=false
 				fi
 			else
 				log_warn "Could not compare manifests (kubectl exec issue)."
 			fi
 			rm -f "$manifest_new"
+		fi
+	done <<< "$(echo "$mounts_str" | tr '__' '\n')"
+
+	if [[ -n "$mounts_str" ]]; then
+		if $manifests_all_match; then
+			log_ok "All mounts verified against old manifests."
+		else
+			log_warn "Some mounts differ from old manifests. Review above."
 		fi
 	fi
 
