@@ -15,6 +15,7 @@ source "$SCRIPT_DIR/lib/nfs.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 source "$SCRIPT_DIR/lib/copy.sh"
 source "$SCRIPT_DIR/lib/validation.sh"
+source "$SCRIPT_DIR/lib/mounts.sh"
 
 source "$SCRIPT_DIR/commands/discover_old.sh"
 source "$SCRIPT_DIR/commands/discover_new.sh"

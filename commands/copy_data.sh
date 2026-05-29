@@ -87,7 +87,7 @@ cmd_copy_data() {
 	fi
 
 	local new_has_data=false
-	if ssh "$nfs_host_new" "test -d '$nfs_path_new' && find '$nfs_path_new' -mindepth 1 -maxdepth 1 | head -1" 2>/dev/null | grep -q .; then
+	if ssh "$nfs_host_new" "test -d '$nfs_path_new' && find '$nfs_path_new' -mindepth 1 -maxdepth 1 -printf 1 -quit" 2>/dev/null | grep -q .; then
 		new_has_data=true
 		log_warn "New NFS path already has data!"
 		ssh "$nfs_host_new" "ls -lah '$nfs_path_new'" 2>/dev/null || true
@@ -162,29 +162,26 @@ cmd_copy_data() {
 		sleep 3
 	done
 
-	local mounts_str subpaths_str
-	mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
-	subpaths_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
-
 	local mount_old_list=() subpath_old_list=() mount_new_list=() subpath_new_list=()
-	local line
-	while IFS= read -r line; do [[ -n "$line" ]] && mount_old_list+=("$line"); done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
-	while IFS= read -r line; do subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_str" | sed 's/__/\n/g')"
-	mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW" || true)
-	subpaths_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_NEW" || true)
-	while IFS= read -r line; do [[ -n "$line" ]] && mount_new_list+=("$line"); done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
-	while IFS= read -r line; do subpath_new_list+=("$line"); done <<< "$(echo "$subpaths_str" | sed 's/__/\n/g')"
+	state_get_mounts "$context" "$namespace" "$migration_id" "OLD"
+	mount_old_list=("${MOUNTS_LIST[@]}")
+	subpath_old_list=("${SUBPATHS_LIST[@]}")
+	local mount_count="$MOUNT_COUNT"
 
-	local mount_count=${#mount_old_list[@]}
-	if [[ "$mount_count" -eq 0 ]]; then
-		mount_count=1
-		mount_old_list=("")
-		subpath_old_list=("")
-		mount_new_list=("")
-		subpath_new_list=("")
+	state_get_mounts "$context" "$namespace" "$migration_id" "NEW"
+	mount_new_list=("${MOUNTS_LIST[@]}")
+	subpath_new_list=("${SUBPATHS_LIST[@]}")
+
+	if [[ "${#mount_old_list[@]}" -ne "$mount_count" ]]; then
+		# Pad/truncate new side to match old side
+		mount_new_list=()
+		subpath_new_list=()
+		local i
+		for ((i = 0; i < mount_count; i++)); do
+			mount_new_list+=("${MOUNTS_LIST[$i]:-}")
+			subpath_new_list+=("${SUBPATHS_LIST[$i]:-}")
+		done
 	fi
-	while [[ ${#subpath_old_list[@]} -lt "$mount_count" ]]; do subpath_old_list+=(""); done
-	while [[ ${#subpath_new_list[@]} -lt "$mount_count" ]]; do subpath_new_list+=(""); done
 
 	echo ""
 	log_info "Copy plan: $mount_count mount(s)"
@@ -247,19 +244,19 @@ cmd_copy_data() {
 		echo '#!/bin/bash'
 		echo 'set -euo pipefail'
 		echo ''
-		echo "nfs_host_old='$nfs_host_old'"
-		echo "nfs_host_new='$nfs_host_new'"
-		echo "nfs_path_old='$nfs_path_old'"
-		echo "nfs_path_new='$nfs_path_new'"
-		echo "backup_base='$backup_base'"
+		echo "nfs_host_old=$(printf '%q' "$nfs_host_old")"
+		echo "nfs_host_new=$(printf '%q' "$nfs_host_new")"
+		echo "nfs_path_old=$(printf '%q' "$nfs_path_old")"
+		echo "nfs_path_new=$(printf '%q' "$nfs_path_new")"
+		echo "backup_base=$(printf '%q' "$backup_base")"
 		echo "restore_mode=$restore_mode"
-		echo "tar_flags='$tar_flags'"
-		echo "tar_extract='$tar_extract'"
-		echo "progress_cmd='$progress_cmd'"
+		echo "tar_flags=$(printf '%q' "$tar_flags")"
+		echo "tar_extract=$(printf '%q' "$tar_extract")"
+		echo "progress_cmd=$(printf '%q' "$progress_cmd")"
 		echo "mount_count=$mount_count"
 		echo ''
-		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do echo -n "'$v' "; done))"
-		echo "subpath_new_list=($(for v in "${subpath_new_list[@]}"; do echo -n "'$v' "; done))"
+		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do printf '%q ' "$v"; done))"
+		echo "subpath_new_list=($(for v in "${subpath_new_list[@]}"; do printf '%q ' "$v"; done))"
 		echo ''
 		echo 'for ((i = 0; i < mount_count; i++)); do'
 		echo '  old_sub="${subpath_old_list[$i]}"'

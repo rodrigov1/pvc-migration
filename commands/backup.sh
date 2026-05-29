@@ -8,10 +8,9 @@ cmd_backup() {
 
 	state_require "$context" "$namespace" "$migration_id"
 
-	local nfs_host_old nfs_path_old subpaths_str
+	local nfs_host_old nfs_path_old
 	nfs_host_old=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_HOST")
 	nfs_path_old=$(state_get "$context" "$namespace" "$migration_id" "NFS_PATH_OLD")
-	subpaths_str=$(state_get "$context" "$namespace" "$migration_id" "SUBPATH_OLD" || true)
 
 	if [[ -z "$nfs_host_old" || -z "$nfs_path_old" ]]; then
 		log_error "Missing old NFS info. Run 'discover-old' first."
@@ -28,15 +27,9 @@ cmd_backup() {
 	backup_base="$(dirname "$nfs_path_old")/${migration_id}-backup"
 
 	local -a subpath_old_list=()
-	if [[ -n "$subpaths_str" ]]; then
-		while IFS= read -r line; do subpath_old_list+=("$line"); done <<< "$(echo "$subpaths_str" | sed 's/__/\n/g')"
-	fi
-
-	local mount_count=${#subpath_old_list[@]}
-	if [[ "$mount_count" -eq 0 ]]; then
-		mount_count=1
-		subpath_old_list=("")
-	fi
+	state_get_mounts "$context" "$namespace" "$migration_id" "OLD"
+	subpath_old_list=("${SUBPATHS_LIST[@]}")
+	local mount_count="$MOUNT_COUNT"
 
 	echo ""
 	log_info "Backup plan for $migration_id in $context/$namespace"
@@ -66,12 +59,12 @@ cmd_backup() {
 		echo "result_file='$result_file'"
 		echo 'trap "echo exit_code=\$? > \"\$result_file\"" EXIT'
 		echo ''
-		echo "nfs_host_old='$nfs_host_old'"
-		echo "nfs_path_old='$nfs_path_old'"
-		echo "backup_base='$backup_base'"
+		echo "nfs_host_old=$(printf '%q' "$nfs_host_old")"
+		echo "nfs_path_old=$(printf '%q' "$nfs_path_old")"
+		echo "backup_base=$(printf '%q' "$backup_base")"
 		echo "mount_count=$mount_count"
 		echo ''
-		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do echo -n "'$v' "; done))"
+		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do printf '%q ' "$v"; done))"
 		echo ''
 		echo 'for ((i = 0; i < mount_count; i++)); do'
 		echo '  sub="${subpath_old_list[$i]}"'

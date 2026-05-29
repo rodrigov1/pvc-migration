@@ -57,3 +57,12 @@ state_del() {
 		sed -i "/^${key}=/d" "$sf"
 	fi
 }
+
+state_del_prefix() {
+	local sf prefix
+	sf=$(state_file_path "$1" "$2" "$3")
+	prefix="$4"
+	if [[ -f "$sf" ]]; then
+		sed -i "/^${prefix}/d" "$sf"
+	fi
+}

@@ -127,35 +127,31 @@ cmd_discover_old() {
 
 	if [[ -n "$vol_in_deploy" ]]; then
 		log_info "Found volume in deployment: $vol_in_deploy"
-		state_del "$context" "$namespace" "$migration_id" "MOUNT_OLD"
-		state_del "$context" "$namespace" "$migration_id" "SUBPATH_OLD"
 
-		local mount_idx=0 raw_mount raw_subpath
+		local mount_old_list=() subpath_old_list=() raw_mount raw_subpath
 		while IFS='|' read -r raw_mount raw_subpath; do
 			local mount_path="${raw_mount#@}"
 			[[ -z "$mount_path" ]] && continue
-			mount_idx=$((mount_idx + 1))
-			log_info "Mount $mount_idx: $mount_path (subPath: ${raw_subpath:-<none>})"
-			state_append "$context" "$namespace" "$migration_id" "MOUNT_OLD" "$mount_path"
-			state_append "$context" "$namespace" "$migration_id" "SUBPATH_OLD" "${raw_subpath:-}"
-		done < <(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
-			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_in_deploy')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null || true)
+			mount_old_list+=("$mount_path")
+			subpath_old_list+=("${raw_subpath:-}")
+		done < <(get_volume_mounts_from_deploy "$context" "$namespace" "$deploy_old" "$vol_in_deploy" 2>/dev/null || true)
 
+		local mount_idx="${#mount_old_list[@]}"
 		if [[ "$mount_idx" -eq 0 ]]; then
 			log_warn "No volume mounts found for volume $vol_in_deploy"
 		else
 			log_info "Total mounts captured: $mount_idx"
+			state_set_mounts "$context" "$namespace" "$migration_id" "OLD" "$mount_idx" "${mount_old_list[@]}" "${subpath_old_list[@]}"
 		fi
 	else
 		log_warn "Could not find volume name for PVC $pvc_old in deployment $deploy_old"
 		local fallback_mount
-		fallback_mount=$(kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" \
-			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$pvc_old')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null | head -1) || true
+		fallback_mount=$(get_volume_mounts_from_deploy "$context" "$namespace" "$deploy_old" "$pvc_old" 2>/dev/null | head -1) || true
 		if [[ -n "$fallback_mount" ]]; then
 			local fb_path="${fallback_mount%%|*}"
 			fb_path="${fb_path#@}"
 			log_info "Fallback mount: $fb_path"
-			state_set "$context" "$namespace" "$migration_id" "MOUNT_OLD" "$fb_path"
+			state_set_mounts "$context" "$namespace" "$migration_id" "OLD" 1 "$fb_path" ""
 		fi
 	fi
 
@@ -164,8 +160,9 @@ cmd_discover_old() {
 	nfs_share_base=$(state_get "$context" "$namespace" "$migration_id" "OLD_NFS_SHARE_BASE" || true)
 	pv_uid=$(state_get "$context" "$namespace" "$migration_id" "OLD_PV_UID" || true)
 
-	if [[ -n "$nfs_host" && -n "$nfs_share_base" && -n "$pv_uid" ]]; then
-		nfs_path_old="${nfs_share_base}/${pv_uid}/"
+	if [[ -n "$nfs_host" && -n "$nfs_share_base" ]]; then
+		nfs_path_old="${nfs_share_base}/"
+		[[ -n "$pv_uid" ]] && nfs_path_old="${nfs_share_base}/${pv_uid}/"
 		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_OLD" "$nfs_path_old"
 		log_ok "Old NFS path (PV root): $nfs_host:$nfs_path_old"
 	else
@@ -180,17 +177,16 @@ cmd_discover_old() {
 	pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
 
 	if [[ -n "$pod_name" ]]; then
-		local mounts_str
-		mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_OLD" || true)
-		if [[ -n "$mounts_str" ]]; then
+		state_get_mounts "$context" "$namespace" "$migration_id" "OLD"
+		if [[ "$MOUNT_COUNT" -gt 0 ]]; then
 			local mnt_idx=0 pids=()
-			while IFS= read -r single_mount; do
+			for single_mount in "${MOUNTS_LIST[@]}"; do
 				[[ -z "$single_mount" ]] && continue
 				mnt_idx=$((mnt_idx + 1))
 				local per_mount_manifest="${manifest_base}.${mnt_idx}"
 				capture_file_manifest "$context" "$namespace" "$pod_name" "$single_mount" "$per_mount_manifest" 2>/dev/null || true &
 				pids+=($!)
-			done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
+			done
 			for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 			log_info "All per-mount manifests captured (${#pids[@]} total)."
 		fi

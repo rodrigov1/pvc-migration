@@ -185,19 +185,19 @@ cmd_discover_new() {
 		-o jsonpath="{range .spec.template.spec.volumes[?(@.persistentVolumeClaim.claimName=='$claim_name')]}{.name}{'\n'}{end}" 2>/dev/null) || true
 
 	if [[ -n "$vol_in_deploy" ]]; then
-		state_del "$context" "$namespace" "$migration_id" "MOUNT_NEW"
-		state_del "$context" "$namespace" "$migration_id" "SUBPATH_NEW"
-
-		local mount_idx=0 raw_mount raw_subpath
+		local mount_new_list=() subpath_new_list=() raw_mount raw_subpath
 		while IFS='|' read -r raw_mount raw_subpath; do
 			local mount_path="${raw_mount#@}"
 			[[ -z "$mount_path" ]] && continue
-			mount_idx=$((mount_idx + 1))
-			log_info "New mount $mount_idx: $mount_path (subPath: ${raw_subpath:-<none>})"
-			state_append "$context" "$namespace" "$migration_id" "MOUNT_NEW" "$mount_path"
-			state_append "$context" "$namespace" "$migration_id" "SUBPATH_NEW" "${raw_subpath:-}"
-		done < <(kubectl get deployment "$deploy_new" -n "$namespace" --context="$context" \
-			-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_in_deploy')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null || true)
+			mount_new_list+=("$mount_path")
+			subpath_new_list+=("${raw_subpath:-}")
+		done < <(get_volume_mounts_from_deploy "$context" "$namespace" "$deploy_new" "$vol_in_deploy" 2>/dev/null || true)
+
+		local mount_idx="${#mount_new_list[@]}"
+		if [[ "$mount_idx" -gt 0 ]]; then
+			log_info "New mounts captured: $mount_idx"
+			state_set_mounts "$context" "$namespace" "$migration_id" "NEW" "$mount_idx" "${mount_new_list[@]}" "${subpath_new_list[@]}"
+		fi
 	else
 		log_warn "Could not find volume name for PVC $pvc_new in deployment $deploy_new"
 	fi
@@ -207,8 +207,9 @@ cmd_discover_new() {
 	nfs_share_base=$(state_get "$context" "$namespace" "$migration_id" "NEW_NFS_SHARE_BASE" || true)
 	pv_uid=$(state_get "$context" "$namespace" "$migration_id" "NEW_PV_UID" || true)
 
-	if [[ -n "$nfs_host" && -n "$nfs_share_base" && -n "$pv_uid" ]]; then
-		nfs_path_new="${nfs_share_base}/${pv_uid}/"
+	if [[ -n "$nfs_host" && -n "$nfs_share_base" ]]; then
+		nfs_path_new="${nfs_share_base}/"
+		[[ -n "$pv_uid" ]] && nfs_path_new="${nfs_share_base}/${pv_uid}/"
 		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_NEW" "$nfs_path_new"
 		log_ok "New NFS path (PV root): $nfs_host:$nfs_path_new"
 	else

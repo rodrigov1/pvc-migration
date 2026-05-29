@@ -8,9 +8,8 @@ cmd_validate() {
 
 	state_require "$context" "$namespace" "$migration_id"
 
-	local depl_new mount_new pvc_new
+	local depl_new pvc_new
 	depl_new=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_NEW")
-	mount_new=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW")
 	pvc_new=$(state_get "$context" "$namespace" "$migration_id" "PVC_NEW")
 
 	if [[ -z "$depl_new" ]]; then
@@ -54,14 +53,12 @@ cmd_validate() {
 		log_warn "Could not fetch logs (kubelet may be unavailable)."
 
 	local manifest_base="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-	local mounts_str manifests_all_match=true
-	mounts_str=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_NEW" || true)
-	if [[ -z "$mounts_str" ]]; then
-		mounts_str="$mount_new"
-	fi
+	local manifests_all_match=true
 
+	state_get_mounts "$context" "$namespace" "$migration_id" "NEW"
 	local mnt_idx=0
-	while IFS= read -r single_mount; do
+
+	for single_mount in "${MOUNTS_LIST[@]}"; do
 		[[ -z "$single_mount" ]] && continue
 		mnt_idx=$((mnt_idx + 1))
 		echo ""
@@ -102,9 +99,9 @@ cmd_validate() {
 			fi
 			rm -f "$manifest_new"
 		fi
-	done <<< "$(echo "$mounts_str" | sed 's/__/\n/g')"
+	done
 
-	if [[ -n "$mounts_str" ]]; then
+	if [[ "$mnt_idx" -gt 0 ]]; then
 		if $manifests_all_match; then
 			log_ok "All mounts verified against old manifests."
 		else
