@@ -19,6 +19,7 @@ done
 bash "$ROOT_DIR/tests/args.sh"
 bash "$ROOT_DIR/tests/smoke_dispatcher.sh"
 bash "$ROOT_DIR/tests/reclaim_policy.sh"
+bash "$ROOT_DIR/tests/copy_result.sh"
 
 if command -v shellcheck &>/dev/null; then
 	shellcheck --shell=bash \

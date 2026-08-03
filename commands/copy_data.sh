@@ -1,3 +1,66 @@
+COPY_RESULT_CODE=""
+
+read_copy_result_code() {
+	local result_file="$1" result_line
+
+	if [[ ! -f "$result_file" ]]; then
+		return 1
+	fi
+	if ! result_line=$(awk 'NF { count++; line=$0 } END { if (count != 1) exit 1; print line }' "$result_file"); then
+		return 1
+	fi
+	if [[ ! "$result_line" =~ ^exit_code=[0-9]+$ ]]; then
+		return 1
+	fi
+
+	COPY_RESULT_CODE="${result_line#exit_code=}"
+}
+
+run_copy_job() {
+	local tmp_script="$1" result_file="$2" use_persistent="$3"
+	local term_cmd="$4" session_name="$5" copy_failed=false
+
+	if [[ "$use_persistent" == true ]]; then
+		if [[ "$term_cmd" == "tmux" ]]; then
+			if tmux new-session -d -s "$session_name" "$tmp_script"; then
+				log_info "tmux session '${session_name}' started"
+				log_info "  Attach: tmux attach -t ${session_name}"
+				log_info "  Session auto-closes on completion."
+				while tmux has-session -t "$session_name" 2>/dev/null; do sleep 5; done
+			else
+				log_error "Could not start tmux session '${session_name}'."
+				copy_failed=true
+			fi
+		else
+			if screen -dmS "$session_name" bash "$tmp_script"; then
+				log_info "screen session '${session_name}' started"
+				log_info "  Attach: screen -r ${session_name}"
+				while screen -list 2>/dev/null | grep -q "$session_name"; do sleep 5; done
+			else
+				log_error "Could not start screen session '${session_name}'."
+				copy_failed=true
+			fi
+		fi
+	else
+		log_info "Starting copy (inline)..."
+		if ! bash "$tmp_script"; then
+			copy_failed=true
+		fi
+	fi
+
+	if ! read_copy_result_code "$result_file"; then
+		log_error "Copy result file is missing or invalid."
+		copy_failed=true
+	elif [[ "$COPY_RESULT_CODE" != "0" ]]; then
+		log_error "Copy script failed with exit code $COPY_RESULT_CODE."
+		copy_failed=true
+	fi
+
+	if $copy_failed; then
+		return 1
+	fi
+}
+
 cmd_copy_data() {
 	local command="copy-data"
 	parse_common_args "$command" "$@" || return 1
@@ -220,10 +283,14 @@ cmd_copy_data() {
 		return
 	fi
 
-	local tmp_script="/tmp/pvc-mig-${migration_id}-$$.sh"
+	local tmp_script result_file
+	tmp_script=$(mktemp "/tmp/pvc-mig-copy-XXXXXX.sh")
+	result_file=$(mktemp "/tmp/pvc-mig-copy-result-XXXXXX")
 	{
 		echo '#!/bin/bash'
 		echo 'set -euo pipefail'
+		echo "result_file=$(printf '%q' "$result_file")"
+		echo 'trap '\''status=$?; printf "exit_code=%s\n" "$status" > "$result_file" || true; trap - EXIT; exit "$status"'\'' EXIT'
 		echo ''
 		echo "nfs_host_old=$(printf '%q' "$nfs_host_old")"
 		echo "nfs_host_new=$(printf '%q' "$nfs_host_new")"
@@ -271,30 +338,30 @@ cmd_copy_data() {
 		echo '  dst="${nfs_path_new}${new_sub:+${new_sub}/}"'
 		echo '  echo "[Mount $((i+1))/$mount_count] Verifying ..."'
 		if $restore_mode; then
-			echo '  old_c=$(ssh "$nfs_host_old" "tar -tzf '\''${backup_base}/${i}.tgz'\'' 2>/dev/null | grep -c -v '\''/$'\'' 2>/dev/null || echo 0")'
+			echo '  if ! old_listing=$(ssh "$nfs_host_old" "tar -tzf '\''${backup_base}/${i}.tgz'\'' 2>/dev/null"); then echo "  [ERROR] Could not read backup archive for mount $((i+1))"; exit 1; fi'
+			echo '  old_c=$(printf "%s\n" "$old_listing" | awk '\''!/\/$/ { count++ } END { print count + 0 }'\'')'
 		else
-			echo '  old_c=$(ssh "$nfs_host_old" "find \"$src\" -type f 2>/dev/null | wc -l" || echo "0")'
+			echo '  if ! old_c=$(ssh "$nfs_host_old" "find \"$src\" -type f 2>/dev/null | wc -l"); then echo "  [ERROR] Could not count source files for mount $((i+1))"; exit 1; fi'
 		fi
-		echo '  new_c=$(ssh "$nfs_host_new" "find \"$dst\" -type f 2>/dev/null | wc -l" || echo "0")'
+		echo '  if ! new_c=$(ssh "$nfs_host_new" "find \"$dst\" -type f 2>/dev/null | wc -l"); then echo "  [ERROR] Could not count destination files for mount $((i+1))"; exit 1; fi'
+		echo '  if [[ ! "$old_c" =~ ^[0-9]+$ || ! "$new_c" =~ ^[0-9]+$ ]]; then echo "  [ERROR] Invalid file count for mount $((i+1))"; exit 1; fi'
 		echo '  total_old=$((total_old + old_c))'
 		echo '  total_new=$((total_new + new_c))'
 		echo '  echo "  File count: backup/old=$old_c new=$new_c"'
 		echo '  if [[ "$old_c" != "$new_c" ]]; then'
-		echo '    echo "  [WARN] Count mismatch"; all_ok=false'
+		echo '    echo "  [ERROR] Count mismatch"; all_ok=false'
 		echo '  else'
 		echo '    echo "  [OK] Count matches"'
 		echo '  fi'
 		if ! $restore_mode; then
-			echo '  old_md5_list=$(ssh "$nfs_host_old" "find \"$src\" -type f -exec md5sum {} + 2>/dev/null" || true)'
-			echo '  new_md5_list=$(ssh "$nfs_host_new" "find \"$dst\" -type f -exec md5sum {} + 2>/dev/null" || true)'
-			echo '  old_md5=$(echo "$old_md5_list" | awk "{print \$1}" | sort | md5sum)'
-			echo '  new_md5=$(echo "$new_md5_list" | awk "{print \$1}" | sort | md5sum)'
-			echo '  if [[ -n "$old_md5" && -n "$new_md5" ]]; then'
-			echo '    if [[ "$old_md5" == "$new_md5" ]]; then'
-			echo '      echo "  [OK] md5 match"'
-			echo '    else'
-			echo '      echo "  [WARN] md5 differ"; all_ok=false'
-			echo '    fi'
+			echo '  if ! old_md5_list=$(ssh "$nfs_host_old" "find \"$src\" -type f -exec md5sum {} + 2>/dev/null"); then echo "  [ERROR] Could not hash source files for mount $((i+1))"; exit 1; fi'
+			echo '  if ! new_md5_list=$(ssh "$nfs_host_new" "find \"$dst\" -type f -exec md5sum {} + 2>/dev/null"); then echo "  [ERROR] Could not hash destination files for mount $((i+1))"; exit 1; fi'
+			echo '  old_md5=$(printf "%s\n" "$old_md5_list" | awk '\''{print $1}'\'' | sort | md5sum | awk '\''{print $1}'\'')'
+			echo '  new_md5=$(printf "%s\n" "$new_md5_list" | awk '\''{print $1}'\'' | sort | md5sum | awk '\''{print $1}'\'')'
+			echo '  if [[ "$old_md5" == "$new_md5" ]]; then'
+			echo '    echo "  [OK] md5 match"'
+			echo '  else'
+			echo '    echo "  [ERROR] md5 differ"; all_ok=false'
 			echo '  fi'
 		else
 			echo '  echo "  [INFO] md5 check skipped (restore mode)"'
@@ -302,9 +369,9 @@ cmd_copy_data() {
 		echo 'done'
 		echo 'echo ""'
 		echo 'echo "Total file count: backup/old=$total_old new=$total_new"'
-		echo 'if [[ "$total_old" == "$total_new" ]]; then echo "[OK] Total matches"; else echo "[WARN] Total mismatch"; all_ok=false; fi'
+		echo 'if [[ "$total_old" == "$total_new" ]]; then echo "[OK] Total matches"; else echo "[ERROR] Total mismatch"; all_ok=false; fi'
 		echo 'echo ""'
-		echo 'if $all_ok; then echo "[OK] All mounts verified successfully."; else echo "[WARN] Some checks failed."; fi'
+		echo 'if $all_ok; then echo "[OK] All mounts verified successfully."; else echo "[ERROR] Some checks failed."; exit 1; fi'
 		echo 'echo "Copy completed at $(date -Iseconds)"'
 	} > "$tmp_script"
 	chmod +x "$tmp_script"
@@ -323,29 +390,22 @@ cmd_copy_data() {
 
 	local start_time end_time elapsed
 	start_time=$(date +%s)
-
-	if $use_persistent; then
-		local session_name="pvc-mig-${migration_id}"
-		if [[ "$term_cmd" == "tmux" ]]; then
-			tmux new-session -d -s "$session_name" "$tmp_script"
-			log_info "tmux session '${session_name}' started"
-			log_info "  Attach: tmux attach -t ${session_name}"
-			log_info "  Session auto-closes on completion."
-			while tmux has-session -t "$session_name" 2>/dev/null; do sleep 5; done
-		else
-			screen -dmS "$session_name" bash "$tmp_script"
-			log_info "screen session '${session_name}' started"
-			log_info "  Attach: screen -r ${session_name}"
-			while screen -list 2>/dev/null | grep -q "$session_name"; do sleep 5; done
-		fi
-	else
-		log_info "Starting copy (inline)..."
-		bash "$tmp_script"
+	local copy_failed=false
+	local session_name="pvc-mig-${migration_id}"
+	if ! run_copy_job "$tmp_script" "$result_file" "$use_persistent" "$term_cmd" "$session_name"; then
+		copy_failed=true
 	fi
 
 	end_time=$(date +%s)
 	elapsed=$((end_time - start_time))
-	rm -f "$tmp_script"
+	rm -f "$tmp_script" "$result_file"
+
+	if $copy_failed; then
+		state_set "$context" "$namespace" "$migration_id" "PHASE" "copy-failed"
+		state_set "$context" "$namespace" "$migration_id" "COPY_ERROR_TIMESTAMP" "$(date -Iseconds)"
+		log_error "Data copy failed. Destination was not marked as copied."
+		return 1
+	fi
 
 	log_ok "Data copy completed in ${elapsed}s"
 
@@ -356,5 +416,5 @@ cmd_copy_data() {
 	log_ok "copy-data complete for $migration_id in $context/$namespace"
 	echo ""
 	echo "===== Next steps ====="
-	echo "1. Run: $SCRIPT_NAME validate $context $namespace $migration_id"
+	echo "1. Run: $SCRIPT_NAME validate -c $context -n $namespace -m $migration_id"
 }
