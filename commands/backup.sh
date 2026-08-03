@@ -172,5 +172,5 @@ cmd_backup() {
 	echo ""
 	echo "===== Next steps ====="
 	echo "1. Deploy the new chart (helm upgrade)"
-	echo "2. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+	echo "2. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
 }

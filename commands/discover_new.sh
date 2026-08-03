@@ -225,5 +225,5 @@ cmd_discover_new() {
 	log_ok "discover-new complete for $migration_id in $context/$namespace"
 	echo ""
 	echo "===== Next steps ====="
-	echo "1. Run: $SCRIPT_NAME copy-data $context $namespace $migration_id"
+	echo "1. Run: $SCRIPT_NAME copy-data -c $context -n $namespace -m $migration_id"
 }

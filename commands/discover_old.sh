@@ -199,15 +199,15 @@ cmd_discover_old() {
 	echo "===== Next steps ====="
 	echo "1. Review the state file and correct any values if needed."
 	if [[ "$reclaim_policy_old" == "Delete" ]]; then
-		echo "2. REQUIRED: Run: $SCRIPT_NAME backup $context $namespace $migration_id"
+		echo "2. REQUIRED: Run: $SCRIPT_NAME backup -c $context -n $namespace -m $migration_id"
 		echo "3. Apply the new chart (4.3.2) to the cluster."
-		echo "4. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+		echo "4. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
 	elif reclaim_policy_requires_backup "$reclaim_policy_old"; then
-		echo "2. SAFETY: ReclaimPolicy is unknown; run: $SCRIPT_NAME backup $context $namespace $migration_id"
+		echo "2. SAFETY: ReclaimPolicy is unknown; run: $SCRIPT_NAME backup -c $context -n $namespace -m $migration_id"
 		echo "3. Apply the new chart (4.3.2) to the cluster."
-		echo "4. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+		echo "4. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
 	else
 		echo "2. Apply the new chart (4.3.2) to the cluster."
-		echo "3. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+		echo "3. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
 	fi
 }
