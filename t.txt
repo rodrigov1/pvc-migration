@@ -19,7 +19,7 @@ OLD_TOTAL_SIZE=740891279
 Luego al aplicar el chart nuevo, ya no puedo hacer discover-new porq imagino cambio el deploy y el nombre del .env no lo toma bien o algo asi
 
 pvc-migration on  main [?] 
-❯ ./pvc_migration.sh discover-new prod n8n n8n-n8n
+❯ ./pvc-migration.sh discover-new prod n8n n8n-n8n
 [ERROR] No deployments found matching 'n8n-n8n' in prod/n8n
 [ERROR] Has the new chart been synced?
 

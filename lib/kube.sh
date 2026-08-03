@@ -39,12 +39,6 @@ get_pv_from_pvc() {
 		-o jsonpath='{.spec.volumeName}' 2>/dev/null || true
 }
 
-get_pvc_volume_name() {
-	local ctx="$1" ns="$2" pvc="$3"
-	kubectl get pvc "$pvc" -n "$ns" --context="$ctx" \
-		-o jsonpath='{.spec.volumeName}' 2>/dev/null || true
-}
-
 get_volume_handle() {
 	local ctx="$1" pv="$2"
 	kubectl get pv "$pv" --context="$ctx" \
@@ -68,30 +62,4 @@ get_volume_mounts_from_deploy() {
 	local ctx="$1" ns="$2" deploy="$3" vol_name="$4"
 	kubectl get deployment "$deploy" -n "$ns" --context="$ctx" \
 		-o jsonpath="{range .spec.template.spec.containers[0].volumeMounts[?(@.name=='$vol_name')]}@{.mountPath}|{.subPath}{'\n'}{end}" 2>/dev/null || true
-}
-
-deployment_exists() {
-	local ctx="$1" ns="$2" deploy="$3"
-	kubectl get deployment "$deploy" -n "$ns" --context="$ctx" &>/dev/null
-}
-
-pvc_exists() {
-	local ctx="$1" ns="$2" pvc="$3"
-	kubectl get pvc "$pvc" -n "$ns" --context="$ctx" &>/dev/null
-}
-
-pv_exists() {
-	local ctx="$1" pv="$2"
-	kubectl get pv "$pv" --context="$ctx" &>/dev/null
-}
-
-scale_deployment() {
-	local ctx="$1" ns="$2" deploy="$3" replicas="$4"
-	kubectl scale deployment "$deploy" -n "$ns" --context="$ctx" --replicas="$replicas" 2>/dev/null || true
-}
-
-get_deployment_replicas() {
-	local ctx="$1" ns="$2" deploy="$3"
-	kubectl get deployment "$deploy" -n "$ns" --context="$ctx" \
-		-o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0"
 }

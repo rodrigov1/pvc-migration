@@ -11,8 +11,6 @@ source "$SCRIPT_DIR/lib/state.sh"
 source "$SCRIPT_DIR/lib/kube.sh"
 source "$SCRIPT_DIR/lib/nfs.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
-source "$SCRIPT_DIR/lib/copy.sh"
-source "$SCRIPT_DIR/lib/validation.sh"
 source "$SCRIPT_DIR/lib/mounts.sh"
 
 source "$SCRIPT_DIR/commands/discover_old.sh"
@@ -22,30 +20,42 @@ source "$SCRIPT_DIR/commands/copy_data.sh"
 source "$SCRIPT_DIR/commands/validate.sh"
 source "$SCRIPT_DIR/commands/status.sh"
 
-SUBCOMMAND="${1:-}"
-shift || true
+main() {
+	check_dependencies
 
-case "$SUBCOMMAND" in
-discover-old | discover_old)
-	cmd_discover_old "$@"
-	;;
-backup)
-	cmd_backup "$@"
-	;;
-discover-new | discover_new)
-	cmd_discover_new "$@"
-	;;
-copy-data | copy_data)
-	cmd_copy_data "$@"
-	;;
-validate)
-	cmd_validate "$@"
-	;;
-status)
-	cmd_status "$@"
-	;;
-*)
-	log_error "Unknown subcommand: ${SUBCOMMAND:-<empty>}"
-	usage
-	;;
-esac
+	if [[ $# -lt 1 ]]; then
+		usage
+	fi
+
+	local subcommand="$1"
+	shift
+
+	case "$subcommand" in
+	discover-old | discover_old)
+		cmd_discover_old "$@"
+		;;
+	backup)
+		cmd_backup "$@"
+		;;
+	discover-new | discover_new)
+		cmd_discover_new "$@"
+		;;
+	copy-data | copy_data)
+		cmd_copy_data "$@"
+		;;
+	validate)
+		cmd_validate "$@"
+		;;
+	status)
+		cmd_status "$@"
+		;;
+	*)
+		log_error "Unknown subcommand: ${subcommand:-<empty>}"
+		usage
+		;;
+	esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

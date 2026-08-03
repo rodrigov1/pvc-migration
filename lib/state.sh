@@ -35,20 +35,6 @@ state_set() {
 	printf '%s=%s\n' "$key" "$value" >>"$sf"
 }
 
-state_append() {
-	local sf key value current
-	sf=$(state_file_path "$1" "$2" "$3")
-	key="$4"
-	value="$5"
-	mkdir -p "$(dirname "$sf")"
-	current=$(state_get "$1" "$2" "$3" "$key" || true)
-	if [[ -n "$current" ]]; then
-		state_set "$1" "$2" "$3" "$key" "${current}__${value}"
-	else
-		state_set "$1" "$2" "$3" "$key" "$value"
-	fi
-}
-
 state_del() {
 	local sf key
 	sf=$(state_file_path "$1" "$2" "$3")

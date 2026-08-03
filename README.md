@@ -6,7 +6,7 @@ Supports multi-mount PVCs with different `subPath`s, backup/restore for `Reclaim
 
 ## Requirements
 
-- `bash` ≥ 4.0, `kubectl`, `ssh`, `jq`, `tar`, `find`, `awk`, `sed`, `grep`
+- `bash` ≥ 4.3, `kubectl`, `ssh`, `jq`, `tar`, `find`, `awk`, `sed`, `grep`
 - Optional: `pv` (progress), `tmux`/`screen` (persistent sessions)
 - All must be on `$PATH`
 
@@ -57,8 +57,25 @@ The tool is organized as:
 
 ```
 commands/     — subcommand implementations
-lib/          — shared helpers (state, kube, nfs, manifest, copy, validation)
+lib/          — shared helpers (state, kube, nfs, manifest, mounts)
 ui/           — logging, prompts, usage
+tests/        — dispatcher smoke tests
+```
+
+Only `pvc-migration.sh` is supported as the entrypoint. The former
+`pvc_migration.sh` entrypoint was removed after the modular implementation
+was completed.
+
+Run the smoke tests with:
+
+```bash
+bash ./tests/run.sh
+```
+
+For static analysis, install ShellCheck and run:
+
+```bash
+shellcheck --shell=bash pvc-migration.sh commands/*.sh lib/*.sh ui/*.sh
 ```
 
 ## Security notes
