@@ -12,25 +12,55 @@ Supports multi-mount PVCs with different `subPath`s, backup/restore for `Reclaim
 
 ## Quick start
 
-### ReclaimPolicy: Retain (no backup needed)
+### ReclaimPolicy: Retain (backup optional)
 
 ```bash
-./pvc-migration.sh discover-old prod app myapp --deploy myapp-old --pvc myapp-pvc
+./pvc-migration.sh discover-old \
+  --context prod --namespace app --migration myapp-2026-08 \
+  --deploy myapp-old --pvc myapp-pvc
 # deploy new chart
-./pvc-migration.sh discover-new prod app myapp --deploy myapp
-./pvc-migration.sh copy-data prod app myapp
-./pvc-migration.sh validate prod app myapp
+./pvc-migration.sh discover-new \
+  --context prod --namespace app --migration myapp-2026-08 \
+  --deploy myapp --pvc myapp-pvc
+./pvc-migration.sh copy-data \
+  --context prod --namespace app --migration myapp-2026-08
+./pvc-migration.sh validate \
+  --context prod --namespace app --migration myapp-2026-08
 ```
 
 ### ReclaimPolicy: Delete (backup before chart deploy)
 
 ```bash
-./pvc-migration.sh discover-old prod app myapp --deploy myapp-old --pvc myapp-pvc
-./pvc-migration.sh backup prod app myapp
+./pvc-migration.sh discover-old \
+  -c prod -n app -m myapp-2026-08 \
+  --deploy myapp-old --pvc myapp-pvc
+./pvc-migration.sh backup \
+  -c prod -n app -m myapp-2026-08
 # deploy new chart
-./pvc-migration.sh discover-new prod app myapp --deploy myapp
-./pvc-migration.sh copy-data prod app myapp
-./pvc-migration.sh validate prod app myapp
+./pvc-migration.sh discover-new \
+  -c prod -n app -m myapp-2026-08 \
+  --deploy myapp --pvc myapp-pvc
+./pvc-migration.sh copy-data \
+  -c prod -n app -m myapp-2026-08
+./pvc-migration.sh validate \
+  -c prod -n app -m myapp-2026-08
+```
+
+The long options are the recommended form. Short aliases are available for
+the common options:
+
+```text
+--context   (-c)  kubectl context, for example: prod
+--namespace (-n)  Kubernetes namespace, for example: app
+--migration (-m)  local migration label/state name, for example: myapp-2026-08
+```
+
+The previous positional form is no longer supported. Use `help` or
+`--help` for command-specific examples:
+
+```bash
+./pvc-migration.sh --help
+./pvc-migration.sh help discover-new
 ```
 
 ## Subcommands
@@ -73,7 +103,7 @@ The tool is organized as:
 
 ```
 commands/     — subcommand implementations
-lib/          — shared helpers (state, kube, nfs, manifest, mounts)
+lib/          — shared helpers (args, state, kube, nfs, manifest, mounts, policy)
 ui/           — logging, prompts, usage
 tests/        — dispatcher and reclaim-policy tests
 ```
