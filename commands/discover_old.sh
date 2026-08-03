@@ -78,9 +78,11 @@ cmd_discover_old() {
 		exit 1
 	fi
 
-	local pv_old
+	local pv_old reclaim_policy_old
 	pv_old=$(get_pv_from_pvc "$context" "$namespace" "$pvc_old")
 	log_info "Found PV: $pv_old"
+	reclaim_policy_old=$(normalize_reclaim_policy "$(get_pv_reclaim_policy "$context" "$pv_old")")
+	log_reclaim_policy_discovery "$reclaim_policy_old"
 
 	local volume_handle_old
 	volume_handle_old=$(get_volume_handle "$context" "$pv_old")
@@ -100,6 +102,7 @@ cmd_discover_old() {
 	state_set "$context" "$namespace" "$migration_id" "DEPLOY_OLD" "$deploy_old"
 	state_set "$context" "$namespace" "$migration_id" "PVC_OLD" "$pvc_old"
 	state_set "$context" "$namespace" "$migration_id" "PV_OLD" "$pv_old"
+	state_set "$context" "$namespace" "$migration_id" "RECLAIM_POLICY_OLD" "$reclaim_policy_old"
 	state_set "$context" "$namespace" "$migration_id" "VOLUME_HANDLE_OLD" "$volume_handle_old"
 
 	if [[ -n "$volume_handle_old" ]]; then
@@ -217,6 +220,16 @@ cmd_discover_old() {
 	echo ""
 	echo "===== Next steps ====="
 	echo "1. Review the state file and correct any values if needed."
-	echo "2. Apply the new chart (4.3.2) to the cluster."
-	echo "3. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+	if [[ "$reclaim_policy_old" == "Delete" ]]; then
+		echo "2. REQUIRED: Run: $SCRIPT_NAME backup $context $namespace $migration_id"
+		echo "3. Apply the new chart (4.3.2) to the cluster."
+		echo "4. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+	elif reclaim_policy_requires_backup "$reclaim_policy_old"; then
+		echo "2. SAFETY: ReclaimPolicy is unknown; run: $SCRIPT_NAME backup $context $namespace $migration_id"
+		echo "3. Apply the new chart (4.3.2) to the cluster."
+		echo "4. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+	else
+		echo "2. Apply the new chart (4.3.2) to the cluster."
+		echo "3. Run: $SCRIPT_NAME discover-new $context $namespace $migration_id"
+	fi
 }

@@ -32,6 +32,11 @@ cmd_discover_new() {
 
 	state_require "$context" "$namespace" "$migration_id"
 
+	local reclaim_policy_old old_phase
+	reclaim_policy_old=$(state_get "$context" "$namespace" "$migration_id" "RECLAIM_POLICY_OLD" || true)
+	old_phase=$(state_get "$context" "$namespace" "$migration_id" "PHASE" || true)
+	reclaim_policy_warn_if_backup_missing "$reclaim_policy_old" "$old_phase"
+
 	if [[ -z "$deploy_new" ]]; then
 		local matches
 		matches=$(get_deployments_by_pattern "$context" "$namespace" "$migration_id")

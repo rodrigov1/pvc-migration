@@ -44,6 +44,22 @@ Supports multi-mount PVCs with different `subPath`s, backup/restore for `Reclaim
 | `validate` | Scale new deployment, verify files inside pod against old manifests |
 | `status` | Display current state file |
 
+## Reclaim policy safety
+
+`discover-old` reads the effective `persistentVolumeReclaimPolicy` from the
+old PV and stores it as `RECLAIM_POLICY_OLD` in the migration state:
+
+- `Retain`: the old PV/backend should remain after PVC deletion; backup is
+  optional, but still recommended for critical data.
+- `Delete`: run `backup` **before** deploying or syncing the new chart.
+  Removing the old PVC may remove the PV and its backend data.
+- Unknown or unsupported values: the tool treats the source as unsafe and
+  recommends `backup`.
+
+`discover-new` warns if the old policy was `Delete` (or unknown) and the state
+does not record a completed backup. It does not block the command, since a
+backup may have been performed externally.
+
 ## State files
 
 Stored at `$HOME/.pvc-migration/state/<context>/<namespace>/<migration-id>.env`.
@@ -59,7 +75,7 @@ The tool is organized as:
 commands/     — subcommand implementations
 lib/          — shared helpers (state, kube, nfs, manifest, mounts)
 ui/           — logging, prompts, usage
-tests/        — dispatcher smoke tests
+tests/        — dispatcher and reclaim-policy tests
 ```
 
 Only `pvc-migration.sh` is supported as the entrypoint. The former

@@ -31,7 +31,7 @@ Subcommands:
 
 Flows:
 
-  Retain (no backup needed):
+  Retain (backup optional):
     discover-old -> deploy chart -> discover-new -> copy-data -> validate
 
   Delete (backup before chart deploy):

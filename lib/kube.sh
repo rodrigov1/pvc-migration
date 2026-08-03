@@ -39,6 +39,12 @@ get_pv_from_pvc() {
 		-o jsonpath='{.spec.volumeName}' 2>/dev/null || true
 }
 
+get_pv_reclaim_policy() {
+	local ctx="$1" pv="$2"
+	kubectl get pv "$pv" --context="$ctx" \
+		-o jsonpath='{.spec.persistentVolumeReclaimPolicy}' 2>/dev/null || true
+}
+
 get_volume_handle() {
 	local ctx="$1" pv="$2"
 	kubectl get pv "$pv" --context="$ctx" \
