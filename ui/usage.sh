@@ -22,6 +22,17 @@ Subcommands:
   validate       Scale the new deployment to 1 and validate copied data.
   status         Display the migration state file.
 
+Operational flow:
+  Retain (backup optional):
+    discover-old -> deploy chart -> discover-new -> copy-data -> validate
+
+  Delete (backup required before chart deploy):
+    discover-old -> backup -> deploy chart -> discover-new -> copy-data -> validate
+
+Operational impact:
+  copy-data scales BOTH deployments to 0.
+  validate scales the new deployment to 1; restore the desired replica count afterward.
+
 Use '$SCRIPT_NAME help <subcommand>' for command-specific options and examples.
 EOF
 		;;
