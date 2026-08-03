@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/lib/env.sh"
 source "$SCRIPT_DIR/ui/logging.sh"
 source "$SCRIPT_DIR/ui/prompts.sh"
 source "$SCRIPT_DIR/ui/usage.sh"
+source "$SCRIPT_DIR/lib/args.sh"
 source "$SCRIPT_DIR/lib/policy.sh"
 source "$SCRIPT_DIR/lib/state.sh"
 source "$SCRIPT_DIR/lib/kube.sh"
@@ -22,13 +23,32 @@ source "$SCRIPT_DIR/commands/validate.sh"
 source "$SCRIPT_DIR/commands/status.sh"
 
 main() {
-	check_dependencies
-
 	if [[ $# -lt 1 ]]; then
-		usage
+		usage "" 1 || true
+		return 1
 	fi
 
 	local subcommand="$1"
+	if [[ "$subcommand" == "-h" || "$subcommand" == "--help" || "$subcommand" == "help" ]]; then
+		if [[ $# -gt 2 ]]; then
+			log_error "Too many arguments for help."
+			usage "" 1 || true
+			return 1
+		fi
+		if [[ -n "${2:-}" ]]; then
+			usage "$2" 0 || return $?
+		else
+			usage "" 0 || return $?
+		fi
+		return 0
+	fi
+	if [[ "$subcommand" == "-h" || "$subcommand" == "--help" || "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+		usage "$subcommand" 0 || return $?
+		return 0
+	fi
+
+	check_dependencies
+
 	shift
 
 	case "$subcommand" in
@@ -52,7 +72,8 @@ main() {
 		;;
 	*)
 		log_error "Unknown subcommand: ${subcommand:-<empty>}"
-		usage
+		usage "" 1 || true
+		return 1
 		;;
 	esac
 }

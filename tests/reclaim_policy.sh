@@ -64,7 +64,8 @@ run_discover_old() {
 	state_root=$(mktemp -d)
 	STATE_BASE="$state_root"
 	MOCK_POLICY="$policy"
-	output=$(cmd_discover_old test-context test-namespace test-migration \
+	output=$(cmd_discover_old \
+		--context test-context --namespace test-namespace --migration test-migration \
 		--deploy old-deployment --pvc old-pvc 2>&1)
 	state_file="$state_root/test-context/test-namespace/test-migration.env"
 
@@ -83,7 +84,8 @@ state_root=$(mktemp -d)
 STATE_BASE="$state_root"
 state_set test-context test-namespace test-migration PHASE discovered-old
 state_set test-context test-namespace test-migration RECLAIM_POLICY_OLD Delete
-discover_new_output=$(cmd_discover_new test-context test-namespace test-migration \
+discover_new_output=$(cmd_discover_new \
+	--context test-context --namespace test-namespace --migration test-migration \
 	--deploy new-deployment --pvc new-pvc 2>&1)
 assert_contains "$discover_new_output" "no completed backup is recorded"
 state_file="$state_root/test-context/test-namespace/test-migration.env"

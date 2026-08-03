@@ -1,30 +1,11 @@
 cmd_copy_data() {
-	local context="" namespace="" migration_id="" use_compress=false
+	local command="copy-data"
+	parse_common_args "$command" "$@" || return 1
+	parse_copy_args "$command" || return 1
+	require_common_args "$command" || return 1
 
-	context="$1"
-	shift || true
-	namespace="$1"
-	shift || true
-	migration_id="$1"
-	shift || true
-
-	while [[ $# -gt 0 ]]; do
-		case "$1" in
-		--compress)
-			use_compress=true
-			shift
-			;;
-		*)
-			log_error "Unknown option: $1"
-			usage
-			;;
-		esac
-	done
-
-	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME copy-data [--compress] <context> <namespace> <migration-id>"
-		exit 1
-	fi
+	local context="$CLI_CONTEXT" namespace="$CLI_NAMESPACE" migration_id="$CLI_MIGRATION"
+	local use_compress="$COPY_COMPRESS"
 
 	state_require "$context" "$namespace" "$migration_id"
 

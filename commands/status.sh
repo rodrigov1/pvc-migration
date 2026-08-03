@@ -1,10 +1,10 @@
 cmd_status() {
-	local context="${1:-}" namespace="${2:-}" migration_id="${3:-}"
+	local command="status"
+	parse_common_args "$command" "$@" || return 1
+	require_common_args "$command" || return 1
+	require_no_command_args "$command" || return 1
 
-	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME status <context> <namespace> <migration-id>"
-		exit 1
-	fi
+	local context="$CLI_CONTEXT" namespace="$CLI_NAMESPACE" migration_id="$CLI_MIGRATION"
 
 	local sf
 	sf=$(state_file_path "$context" "$namespace" "$migration_id")

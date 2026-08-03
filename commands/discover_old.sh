@@ -1,42 +1,20 @@
 cmd_discover_old() {
-	local context="" namespace="" migration_id="" deploy_old="" pvc_old=""
+	local command="discover-old"
+	parse_common_args "$command" "$@" || return 1
+	parse_discovery_args "$command" || return 1
+	require_common_args "$command" || return 1
+	require_no_command_args "$command" || return 1
 
-	context="$1"
-	shift || true
-	namespace="$1"
-	shift || true
-	migration_id="$1"
-	shift || true
-
-	while [[ $# -gt 0 ]]; do
-		case "$1" in
-		--deploy)
-			deploy_old="$2"
-			shift 2
-			;;
-		--pvc)
-			pvc_old="$2"
-			shift 2
-			;;
-		*)
-			log_error "Unknown option: $1"
-			usage
-			;;
-		esac
-	done
-
-	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME discover-old <context> <namespace> <migration-id> --deploy <deploy> --pvc <pvc>"
-		exit 1
-	fi
+	local context="$CLI_CONTEXT" namespace="$CLI_NAMESPACE" migration_id="$CLI_MIGRATION"
+	local deploy_old="$DISCOVERY_DEPLOY" pvc_old="$DISCOVERY_PVC"
 
 	if [[ -z "$deploy_old" ]]; then
-		log_error "--deploy is required. Specify the old deployment name."
-		usage
+		cli_usage_error "$command" "--deploy is required. Specify the old deployment name." || true
+		return 1
 	fi
 	if [[ -z "$pvc_old" ]]; then
-		log_error "--pvc is required. Specify the old PVC name."
-		usage
+		cli_usage_error "$command" "--pvc is required. Specify the old PVC name." || true
+		return 1
 	fi
 
 	local existing_phase
@@ -44,7 +22,7 @@ cmd_discover_old() {
 	local existing_deploy
 	existing_deploy=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD" || true)
 	if [[ -n "$existing_phase" && -n "$existing_deploy" ]]; then
-		log_info "Existing state found (phase=$existing_phase). Add --force to re-discover."
+		log_info "Existing state found (phase=$existing_phase). Confirm to re-discover."
 		if ! confirm "Re-discover old state?"; then
 			log_info "Aborted."
 			return

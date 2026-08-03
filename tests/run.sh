@@ -16,6 +16,7 @@ for script in "${scripts[@]}"; do
 	bash -n "$script"
 done
 
+bash "$ROOT_DIR/tests/args.sh"
 bash "$ROOT_DIR/tests/smoke_dispatcher.sh"
 bash "$ROOT_DIR/tests/reclaim_policy.sh"
 

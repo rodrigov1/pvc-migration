@@ -1,34 +1,12 @@
 cmd_discover_new() {
-	local context="" namespace="" migration_id="" deploy_new="" pvc_new=""
+	local command="discover-new"
+	parse_common_args "$command" "$@" || return 1
+	parse_discovery_args "$command" || return 1
+	require_common_args "$command" || return 1
+	require_no_command_args "$command" || return 1
 
-	context="$1"
-	shift || true
-	namespace="$1"
-	shift || true
-	migration_id="$1"
-	shift || true
-
-	while [[ $# -gt 0 ]]; do
-		case "$1" in
-		--deploy)
-			deploy_new="$2"
-			shift 2
-			;;
-		--pvc)
-			pvc_new="$2"
-			shift 2
-			;;
-		*)
-			log_error "Unknown option: $1"
-			usage
-			;;
-		esac
-	done
-
-	if [[ -z "$context" || -z "$namespace" || -z "$migration_id" ]]; then
-		log_error "Usage: $SCRIPT_NAME discover-new <context> <namespace> <migration-id> [--deploy <deploy>] [--pvc <pvc>]"
-		exit 1
-	fi
+	local context="$CLI_CONTEXT" namespace="$CLI_NAMESPACE" migration_id="$CLI_MIGRATION"
+	local deploy_new="$DISCOVERY_DEPLOY" pvc_new="$DISCOVERY_PVC"
 
 	state_require "$context" "$namespace" "$migration_id"
 
