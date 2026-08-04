@@ -3,7 +3,7 @@ STATE_BASE="${STATE_BASE:-$HOME/.pvc-migration/state}"
 
 check_dependencies() {
 	local missing=false
-	for cmd in kubectl ssh jq awk sed grep tar find; do
+	for cmd in kubectl ssh jq awk sed grep tar find sha256sum stat sort cmp readlink; do
 		if ! command -v "$cmd" &>/dev/null; then
 			echo "Error: Required dependency '$cmd' is not installed." >&2
 			missing=true

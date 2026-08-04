@@ -4,34 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/pvc-migration.sh"
 
-tmux() {
-	case "$1" in
-	new-session)
-		bash "${@: -1}"
-		;;
-	has-session)
-		return 1
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-screen() {
-	case "$1" in
-	-dmS)
-		bash "${@: -1}"
-		;;
-	-list)
-		return 1
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
 make_job_script() {
 	local script="$1" result_file="$2" exit_code="$3" escaped_result
 	escaped_result=$(printf '%q' "$result_file")
@@ -49,14 +21,13 @@ assert_result_code() {
 }
 
 run_success_case() {
-	local mode="$1" result_file script
+	local result_file script
 	result_file=$(mktemp)
 	script=$(mktemp)
 	make_job_script "$script" "$result_file" 0
 
-	if ! run_copy_job "$script" "$result_file" "$([[ "$mode" != inline ]] && echo true || echo false)" \
-		"$mode" "test-session" >/dev/null 2>&1; then
-		printf '%s copy should succeed\n' "$mode" >&2
+	if ! run_copy_job "$script" "$result_file" >/dev/null 2>&1; then
+		printf 'Inline copy should succeed\n' >&2
 		exit 1
 	fi
 	assert_result_code "$result_file" 0
@@ -64,31 +35,27 @@ run_success_case() {
 }
 
 run_failure_case() {
-	local mode="$1" result_file script
+	local result_file script
 	result_file=$(mktemp)
 	script=$(mktemp)
 	make_job_script "$script" "$result_file" 1
 
-	if run_copy_job "$script" "$result_file" "$([[ "$mode" != inline ]] && echo true || echo false)" \
-		"$mode" "test-session" >/dev/null 2>&1; then
-		printf '%s failure must be propagated\n' "$mode" >&2
+	if run_copy_job "$script" "$result_file" >/dev/null 2>&1; then
+		printf 'Inline failure must be propagated\n' >&2
 		exit 1
 	fi
 	assert_result_code "$result_file" 1
 	rm -f "$script" "$result_file"
 }
 
-run_success_case inline
-run_failure_case inline
-run_success_case tmux
-run_failure_case tmux
-run_success_case screen
+run_success_case
+run_failure_case
 
 missing_result=$(mktemp)
 missing_script=$(mktemp)
 printf '#!/bin/bash\nexit 0\n' >"$missing_script"
 rm -f "$missing_result"
-if run_copy_job "$missing_script" "$missing_result" true screen test-session >/dev/null 2>&1; then
+if run_copy_job "$missing_script" "$missing_result" >/dev/null 2>&1; then
 	printf 'Missing result file must fail\n' >&2
 	exit 1
 fi
@@ -103,7 +70,9 @@ fi
 rm -f "$invalid_result"
 
 COPY_PHASE=""
+declare -A MOCK_STATE=()
 MOCK_BAD_HASH=false
+KUBECTL_CALLED=false
 old_root=$(mktemp -d)
 new_root=$(mktemp -d)
 mock_bin=$(mktemp -d)
@@ -113,12 +82,21 @@ printf '%s\n' \
 	'host="$1"' \
 	'shift' \
 	'remote_command="$1"' \
-	'if [[ "${MOCK_BAD_HASH:-false}" == true && "$host" == new-host && "$remote_command" == *"md5sum"* ]]; then' \
+	'if [[ "${MOCK_BAD_HASH:-false}" == true && "$host" == new-host && "$remote_command" == *"sha256sum"* ]]; then' \
 		'printf "00000000000000000000000000000000  fake-file\\n"' \
 		'exit 0' \
-	'fi' \
+		'fi' \
 	'exec bash -c "$remote_command"' >"$mock_bin/ssh"
 chmod +x "$mock_bin/ssh"
+real_sha256sum=$(command -v sha256sum)
+printf '%s\n' \
+	'#!/bin/bash' \
+	'if [[ "${MOCK_BAD_HASH:-false}" == true && "${MOCK_VERIFY_SIDE:-}" == new ]]; then' \
+		'printf "00000000000000000000000000000000  %s\\n" "$1"' \
+		'exit 0' \
+	'fi' \
+	"exec $real_sha256sum \"\$@\"" >"$mock_bin/sha256sum"
+chmod +x "$mock_bin/sha256sum"
 export MOCK_BAD_HASH
 PATH="$mock_bin:$PATH"
 mkdir -p "$old_root/data"
@@ -136,10 +114,12 @@ state_get() {
 	NFS_PATH_OLD) printf '%s/\n' "$old_root" ;;
 	NEW_NFS_HOST) printf 'new-host\n' ;;
 	NFS_PATH_NEW) printf '%s/\n' "$new_root" ;;
+	*) printf '%s\n' "${MOCK_STATE[$4]:-}" ;;
 	esac
 }
 
 state_set() {
+	MOCK_STATE["$4"]="$5"
 	if [[ "$4" == "PHASE" ]]; then
 		COPY_PHASE="$5"
 	fi
@@ -164,6 +144,7 @@ confirm_default_yes() {
 }
 
 kubectl() {
+	KUBECTL_CALLED=true
 	case "$1 $2" in
 	get\ deployment|get\ pods|scale\ deployment)
 		return 0
@@ -176,11 +157,11 @@ kubectl() {
 
 ssh() {
 	local host="$1" remote_command="$2"
-	if [[ "$MOCK_BAD_HASH" == true && "$host" == "new-host" && "$remote_command" == *"md5sum"* ]]; then
-		printf '00000000000000000000000000000000  fake-file\n'
-		return 0
+	if [[ "$host" == "new-host" ]]; then
+		MOCK_VERIFY_SIDE=new bash -c "$remote_command"
+	else
+		MOCK_VERIFY_SIDE=old bash -c "$remote_command"
 	fi
-	bash -c "$remote_command"
 }
 
 copy_output_file=$(mktemp)
@@ -211,9 +192,26 @@ if [[ "$COPY_PHASE" != "copy-failed" ]]; then
 	printf 'A failed verification must set the copy-failed phase\n' >&2
 	exit 1
 fi
+if [[ "${MOCK_STATE[VERIFY_STATUS]:-}" != failed ]]; then
+	printf 'A failed retry must invalidate a previously passed verification\n' >&2
+	exit 1
+fi
+
+MOCK_STATE[VERIFY_STATUS]=passed
+MOCK_STATE[PHASE]=copy-failed
+KUBECTL_CALLED=false
+if cmd_validate --context test-context --namespace test-namespace --migration test-migration \
+	>/dev/null 2>&1; then
+	printf 'validate must reject a stale passed baseline when phase is copy-failed\n' >&2
+	exit 1
+fi
+if [[ "$KUBECTL_CALLED" == true ]]; then
+	printf 'validate must reject invalid state before touching Kubernetes\n' >&2
+	exit 1
+fi
 
 rm -f "$old_root/data/file.txt" "$new_root/data/file.txt"
-rm -f "$mock_bin/ssh"
+rm -f "$mock_bin/ssh" "$mock_bin/sha256sum"
 rmdir "$old_root/data" "$old_root" "$new_root/data" "$new_root" "$mock_bin"
 
 printf 'Copy result tests passed.\n'

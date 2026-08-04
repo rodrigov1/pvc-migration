@@ -208,10 +208,10 @@ cmd_discover_new() {
 	fi
 
 	if [[ -n "$nfs_host" && -n "${nfs_path_new:-}" ]]; then
-		if ssh "$nfs_host" "test -d '$nfs_path_new'" 2>/dev/null; then
+		if ssh_run "$nfs_host" test -d "$nfs_path_new" 2>/dev/null; then
 			log_warn "New NFS path ALREADY EXISTS: $nfs_host:$nfs_path_new"
 			log_warn "Contents:"
-			ssh "$nfs_host" "ls -lah '$nfs_path_new'" 2>/dev/null || true
+			ssh_run "$nfs_host" ls -lah "$nfs_path_new" 2>/dev/null || true
 			local new_total_bytes
 			new_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_new")
 			state_set "$context" "$namespace" "$migration_id" "NEW_TOTAL_SIZE" "$new_total_bytes"

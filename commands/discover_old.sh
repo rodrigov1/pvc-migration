@@ -153,42 +153,11 @@ cmd_discover_old() {
 		log_info "  pv_uid=$pv_uid"
 	fi
 
-	local manifest_base="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-	local pod_name
-	pod_name=$(get_pod_for_deploy "$context" "$namespace" "$deploy_old")
-
-	if [[ -n "$pod_name" ]]; then
-		state_get_mounts "$context" "$namespace" "$migration_id" "OLD"
-		if [[ "$MOUNT_COUNT" -gt 0 ]]; then
-			local mnt_idx=0 pids=()
-			for single_mount in "${MOUNTS_LIST[@]}"; do
-				[[ -z "$single_mount" ]] && continue
-				mnt_idx=$((mnt_idx + 1))
-				local per_mount_manifest="${manifest_base}.${mnt_idx}"
-				capture_file_manifest "$context" "$namespace" "$pod_name" "$single_mount" "$per_mount_manifest" 2>/dev/null || true &
-				pids+=($!)
-			done
-			for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
-			log_info "All per-mount manifests captured (${#pids[@]} total)."
-		fi
-	else
-		log_info "No running pod — capturing combined NFS manifest (needed for validate)."
-		if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
-			capture_file_manifest_nfs "$nfs_host" "$nfs_path_old" "$manifest_base" 2>/dev/null || true
-		fi
-	fi
+	log_info "Baseline source manifest will be captured after old writers are quiesced."
 
 	local old_total_bytes=0
-	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh "$nfs_host" "test -d '$nfs_path_old'" 2>/dev/null; then
+	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh_run "$nfs_host" test -d "$nfs_path_old" 2>/dev/null; then
 		old_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_old")
-	elif [[ -f "${manifest_base}.1" ]]; then
-		for mf in "$manifest_base".*; do
-			local sz
-			sz=$(compute_total_size_manifest "$mf")
-			old_total_bytes=$((old_total_bytes + sz))
-		done
-	elif [[ -f "$manifest_base" ]]; then
-		old_total_bytes=$(compute_total_size_manifest "$manifest_base")
 	fi
 	state_set "$context" "$namespace" "$migration_id" "OLD_TOTAL_SIZE" "$old_total_bytes"
 	log_info "Old data size: $(human_size "$old_total_bytes")"

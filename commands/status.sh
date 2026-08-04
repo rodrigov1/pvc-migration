@@ -26,6 +26,15 @@ cmd_status() {
 		log_info "Old PV reclaim policy: $reclaim_policy_old"
 	fi
 
+	local verify_format verify_status verify_dir
+	verify_format=$(state_get "$context" "$namespace" "$migration_id" "VERIFY_FORMAT" || true)
+	verify_status=$(state_get "$context" "$namespace" "$migration_id" "VERIFY_STATUS" || true)
+	verify_dir=$(verification_dir "$context" "$namespace" "$migration_id")
+	if [[ -n "$verify_format" || -n "$verify_status" ]]; then
+		log_info "Baseline verification: ${verify_status:-not-run} (${verify_format:-unknown})"
+		log_info "Verification artifacts: $verify_dir"
+	fi
+
 	local phase
 	phase=$(state_get "$context" "$namespace" "$migration_id" "PHASE" || true)
 	if [[ -n "$phase" ]]; then

@@ -8,6 +8,15 @@ cmd_validate() {
 
 	state_require "$context" "$namespace" "$migration_id"
 
+	local verify_status phase
+	verify_status=$(state_get "$context" "$namespace" "$migration_id" "VERIFY_STATUS" || true)
+	phase=$(state_get "$context" "$namespace" "$migration_id" "PHASE" || true)
+	if [[ "$verify_status" != "passed" || "$phase" != "copied" ]]; then
+		log_error "Migration is not ready for validation (phase: ${phase:-missing}, baseline: ${verify_status:-missing})."
+		log_error "Run copy-data successfully before validate."
+		return 1
+	fi
+
 	local depl_new pvc_new
 	depl_new=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_NEW")
 	pvc_new=$(state_get "$context" "$namespace" "$migration_id" "PVC_NEW")
@@ -52,11 +61,8 @@ cmd_validate() {
 	kubectl logs "$pod_name" -n "$namespace" --context="$context" --tail=20 2>/dev/null ||
 		log_warn "Could not fetch logs (kubelet may be unavailable)."
 
-	local manifest_base="$STATE_BASE/$context/$namespace/${migration_id}.old.manifest"
-	local manifests_all_match=true
-
 	state_get_mounts "$context" "$namespace" "$migration_id" "NEW"
-	local mnt_idx=0
+	local mnt_idx=0 validation_ok=true
 
 	for single_mount in "${MOUNTS_LIST[@]}"; do
 		[[ -z "$single_mount" ]] && continue
@@ -66,48 +72,21 @@ cmd_validate() {
 
 		if ! kubectl exec "$pod_name" -n "$namespace" --context="$context" -- \
 			ls -lah "$single_mount" 2>/dev/null; then
-			log_warn "kubectl exec failed for $single_mount"
+			log_error "kubectl exec failed for $single_mount"
 			log_warn "Check manually: kubectl exec -n $namespace --context=$context $pod_name -- ls -lah $single_mount"
-		fi
-
-		local manifest_old="${manifest_base}.${mnt_idx}"
-		if [[ ! -f "$manifest_old" ]]; then
-			if [[ -f "$manifest_base" && ! -f "${manifest_base}.1" ]]; then
-				manifest_old="$manifest_base"
-			else
-				manifest_old=""
-			fi
-		fi
-		if [[ -n "$manifest_old" && -f "$manifest_old" ]]; then
-			echo ""
-			log_info "Comparing with old manifest ${manifest_old##*/}..."
-			local manifest_new
-			manifest_new=$(mktemp)
-			local base_path="${single_mount%/}/"
-			if kubectl exec "$pod_name" -n "$namespace" --context="$context" -- \
-				find "$single_mount" -type f -exec ls -ln {} + 2>/dev/null |
-				strip_path_prefix "$base_path" >"$manifest_new" 2>/dev/null; then
-				if diff <(sort "$manifest_old") <(sort "$manifest_new") &>/dev/null; then
-					log_ok "Files match old manifest."
-				else
-					log_warn "Files differ from old manifest:"
-					diff <(sort "$manifest_old") <(sort "$manifest_new") || true
-					manifests_all_match=false
-				fi
-			else
-				log_warn "Could not compare manifests (kubectl exec issue)."
-			fi
-			rm -f "$manifest_new"
+			validation_ok=false
 		fi
 	done
 
-	if [[ "$mnt_idx" -gt 0 ]]; then
-		if $manifests_all_match; then
-			log_ok "All mounts verified against old manifests."
-		else
-			log_warn "Some mounts differ from old manifests. Review above."
-		fi
+	if [[ "$mnt_idx" -eq 0 ]]; then
+		log_error "No new mounts were available for validation."
+		validation_ok=false
 	fi
+	if ! $validation_ok; then
+		state_set "$context" "$namespace" "$migration_id" "PHASE" "validation-failed"
+		return 1
+	fi
+	log_ok "All new mount paths are visible from pod $pod_name."
 
 	echo ""
 	log_info "===== PV Cleanup Assessment ====="

@@ -8,11 +8,13 @@ source "$SCRIPT_DIR/ui/logging.sh"
 source "$SCRIPT_DIR/ui/prompts.sh"
 source "$SCRIPT_DIR/ui/usage.sh"
 source "$SCRIPT_DIR/lib/args.sh"
+source "$SCRIPT_DIR/lib/session.sh"
 source "$SCRIPT_DIR/lib/policy.sh"
 source "$SCRIPT_DIR/lib/state.sh"
 source "$SCRIPT_DIR/lib/kube.sh"
 source "$SCRIPT_DIR/lib/nfs.sh"
-source "$SCRIPT_DIR/lib/manifest.sh"
+source "$SCRIPT_DIR/lib/remote.sh"
+source "$SCRIPT_DIR/lib/verification.sh"
 source "$SCRIPT_DIR/lib/mounts.sh"
 
 source "$SCRIPT_DIR/commands/discover_old.sh"
@@ -45,6 +47,13 @@ main() {
 	if [[ "$subcommand" == "-h" || "$subcommand" == "--help" || "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
 		usage "$subcommand" 0 || return $?
 		return 0
+	fi
+	local session_result=0
+	maybe_run_in_persistent_session "$subcommand" "${@:2}" || session_result=$?
+	if [[ "$session_result" -eq 10 ]]; then
+		return 0
+	elif [[ "$session_result" -ne 0 ]]; then
+		return "$session_result"
 	fi
 
 	check_dependencies

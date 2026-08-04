@@ -35,18 +35,9 @@ human_size() {
 	fi
 }
 
-compute_total_size_manifest() {
-	local manifest_file="$1"
-	if [[ -f "$manifest_file" ]]; then
-		awk '{s+=$1} END{print s+0}' "$manifest_file" 2>/dev/null || echo "0"
-	else
-		echo "0"
-	fi
-}
-
 compute_total_size_nfs() {
 	local nfs_host="$1" nfs_path="$2"
-	ssh "$nfs_host" "du -sb '$nfs_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || echo "0"
+	ssh_bash "$nfs_host" 'du -sb -- "$1" 2>/dev/null | awk '\''{print $1}'\''' "$nfs_path" 2>/dev/null || echo "0"
 }
 
 nfs_test_ssh() {

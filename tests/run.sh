@@ -20,6 +20,9 @@ bash "$ROOT_DIR/tests/args.sh"
 bash "$ROOT_DIR/tests/smoke_dispatcher.sh"
 bash "$ROOT_DIR/tests/reclaim_policy.sh"
 bash "$ROOT_DIR/tests/copy_result.sh"
+bash "$ROOT_DIR/tests/verification_manifest.sh"
+bash "$ROOT_DIR/tests/backup_baseline.sh"
+bash "$ROOT_DIR/tests/remote_session.sh"
 
 if command -v shellcheck &>/dev/null; then
 	shellcheck --shell=bash \

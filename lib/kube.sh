@@ -6,6 +6,36 @@ get_deploy_selector() {
 		jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' 2>/dev/null || true
 }
 
+wait_for_deployment_pods_zero() {
+	local ctx="$1" ns="$2" deploy="$3" timeout_seconds="${4:-60}" selector="${5:-}"
+
+	if [[ -z "$selector" ]]; then
+		selector=$(get_deploy_selector "$ctx" "$ns" "$deploy")
+	fi
+	if [[ -z "$selector" ]]; then
+		log_error "Could not determine pod selector for deployment $deploy."
+		return 1
+	fi
+
+	local deadline=$((SECONDS + timeout_seconds)) pod_list
+	while true; do
+		if ! pod_list=$(kubectl get pods -n "$ns" --context="$ctx" -l "$selector" -o name 2>/dev/null); then
+			log_error "Could not query pods for deployment $deploy while waiting for termination."
+			return 1
+		fi
+		if [[ -z "$pod_list" ]]; then
+			log_ok "All pods for $deploy terminated."
+			return 0
+		fi
+		if ((SECONDS >= deadline)); then
+			log_error "Timeout waiting for pods of $deploy to terminate."
+			return 1
+		fi
+		log_info "Pods remaining for $deploy: $(printf '%s\n' "$pod_list" | wc -l)"
+		sleep 3
+	done
+}
+
 get_pod_for_deploy() {
 	local ctx="$1" ns="$2" deploy="$3"
 	local selector
