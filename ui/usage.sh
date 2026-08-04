@@ -16,10 +16,10 @@ Common options (required by every subcommand):
 
 Subcommands:
   discover-old   Discover old PVC/PV/NFS state. Requires --deploy and --pvc.
-  backup         Create backup tarballs before a Delete-policy PVC is removed.
+  backup         Quiesce the old deployment and create a verified backup.
   discover-new   Discover new resources after chart deployment.
-  copy-data      Copy/restore data through the NFS backends.
-  validate       Scale the new deployment to 1 and validate copied data.
+  copy-data      Copy/restore data and run baseline SHA-256 verification.
+  validate       Require baseline success, then validate the new pod mounts.
   status         Display the migration state file.
 
 Operational flow:
@@ -32,6 +32,7 @@ Operational flow:
 Operational impact:
   copy-data scales BOTH deployments to 0.
   validate scales the new deployment to 1; restore the desired replica count afterward.
+  backup/copy-data can wrap the COMPLETE workflow in tmux/screen when available.
 
 Use '$SCRIPT_NAME help <subcommand>' for command-specific options and examples.
 EOF
@@ -41,7 +42,8 @@ EOF
 Usage: $SCRIPT_NAME discover-old -c <context> -n <namespace> -m <migration> \\
   --deploy <old-deployment> --pvc <old-pvc>
 
-Discovers the old PVC, PV, NFS backend, reclaim policy, mounts, and manifests.
+Discovers the old PVC, PV, NFS backend, reclaim policy, and mounts.
+The source baseline is captured later, after writers are quiesced.
 The ReclaimPolicy is Delete, run backup before deploying the new chart.
 EOF
 		;;
@@ -67,7 +69,8 @@ EOF
 		cat <<EOF
 Usage: $SCRIPT_NAME copy-data -c <context> -n <namespace> -m <migration> [--compress]
 
-Scales BOTH deployments to 0 and copies/restores data through SSH/tar.
+Scales BOTH deployments to 0, copies/restores through SSH/tar, and compares
+baseline manifests containing SHA-256 content and POSIX metadata.
 Use --compress for slow links. Review the copy plan before confirming.
 EOF
 		;;
@@ -75,7 +78,8 @@ EOF
 		cat <<EOF
 Usage: $SCRIPT_NAME validate -c <context> -n <namespace> -m <migration>
 
-Scales the new deployment to 1, checks files against old manifests,
+Requires a passed baseline verification, scales the new deployment to 1, and
+checks every migrated mount from the pod,
 and prints a PV cleanup assessment. Restore the desired replica count afterward.
 EOF
 		;;
