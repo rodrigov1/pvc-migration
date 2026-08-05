@@ -43,6 +43,7 @@ Usage: $SCRIPT_NAME discover-old -c <context> -n <namespace> -m <migration> \\
   --deploy <old-deployment> --pvc <old-pvc>
 
 Discovers the old PVC, PV, NFS backend, reclaim policy, and mounts.
+Prints a compact source summary; full values remain in the migration state.
 The source baseline is captured later, after writers are quiesced.
 The ReclaimPolicy is Delete, run backup before deploying the new chart.
 EOF

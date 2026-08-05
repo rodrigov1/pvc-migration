@@ -8,6 +8,9 @@ cmd_discover_old() {
 	local context="$CLI_CONTEXT" namespace="$CLI_NAMESPACE" migration_id="$CLI_MIGRATION"
 	local deploy_old="$DISCOVERY_DEPLOY" pvc_old="$DISCOVERY_PVC"
 
+	echo ""
+	echo "Discovering source for $migration_id..."
+
 	if [[ -z "$deploy_old" ]]; then
 		cli_usage_error "$command" "--deploy is required. Specify the old deployment name." || true
 		return 1
@@ -22,56 +25,51 @@ cmd_discover_old() {
 	local existing_deploy
 	existing_deploy=$(state_get "$context" "$namespace" "$migration_id" "DEPLOY_OLD" || true)
 	if [[ -n "$existing_phase" && -n "$existing_deploy" ]]; then
-		log_info "Existing state found (phase=$existing_phase). Confirm to re-discover."
-		if ! confirm "Re-discover old state?"; then
+		log_warn "Existing source state found (phase=$existing_phase)."
+		if ! confirm "Re-discover source state?"; then
 			log_info "Aborted."
 			return
 		fi
 	fi
 
-	if echo "$pvc_old" | grep -q -- '--.*pvc$'; then
-		log_warn "========================================================================="
-		log_warn "PVC '$pvc_old' looks like a 4.3.2 naming pattern (*--*pvc)."
-		log_warn "If the new chart has already been synced, this discover-old is CAPTURING"
-		log_warn "THE NEW STATE as if it were the old state, which is incorrect."
-		log_warn "========================================================================="
-		if echo "$pvc_old" | grep -q -- '--.*[0-9]\+gi.*pvc$'; then
-			log_warn "PVC name contains a size suffix (e.g. '15gi'), confirming 4.3.2 pattern."
-		fi
-		if ! confirm "Continue anyway?"; then
+	if echo "$pvc_old" | grep -Eiq -- '--.*[0-9]+(ki|mi|gi|ti|pi|ei)-pvc$'; then
+		log_warn "PVC name includes a size suffix from the legacy 4.3.x naming bug:"
+		printf '       %s\n' "$pvc_old"
+		printf '       The 5.0.0 naming format no longer includes this suffix.\n'
+		printf '       Confirm this is the OLD PVC, not one created by the new chart.\n'
+		if ! confirm "Use this PVC as migration source?"; then
 			log_info "Aborted. Re-run with --pvc pointing to the OLD PVC name if you know it."
 			exit 1
 		fi
 	fi
 
-	log_info "Verifying deployment $deploy_old ..."
 	if ! kubectl get deployment "$deploy_old" -n "$namespace" --context="$context" &>/dev/null; then
 		log_error "Deployment $deploy_old not found in $context/$namespace"
 		exit 1
 	fi
 
-	log_info "Verifying PVC $pvc_old ..."
 	if ! kubectl get pvc "$pvc_old" -n "$namespace" --context="$context" &>/dev/null; then
 		log_error "PVC $pvc_old not found in $context/$namespace"
 		exit 1
 	fi
 
+	local deployment_pvcs
+	deployment_pvcs=$(get_pvcs_from_deploy "$context" "$namespace" "$deploy_old" || true)
+	if [[ -n "$deployment_pvcs" ]]; then
+		local -a deployment_pvc_names=()
+		mapfile -t deployment_pvc_names <<<"$deployment_pvcs"
+		if [[ ${#deployment_pvc_names[@]} -gt 1 ]]; then
+			log_info "Deployment $deploy_old uses ${#deployment_pvc_names[@]} PVCs; migrating only:"
+			printf '       %s\n' "$pvc_old"
+		fi
+	fi
+
 	local pv_old reclaim_policy_old
 	pv_old=$(get_pv_from_pvc "$context" "$namespace" "$pvc_old")
-	log_info "Found PV: $pv_old"
 	reclaim_policy_old=$(normalize_reclaim_policy "$(get_pv_reclaim_policy "$context" "$pv_old")")
-	log_reclaim_policy_discovery "$reclaim_policy_old"
 
 	local volume_handle_old
 	volume_handle_old=$(get_volume_handle "$context" "$pv_old")
-	if [[ -z "$volume_handle_old" ]]; then
-		log_warn "No CSI volumeHandle found for PV $pv_old. Trying spec.nfs..."
-		local nfs_info
-		nfs_info=$(get_nfs_from_pv "$context" "$pv_old")
-		log_info "NFS info from PV: $nfs_info"
-	else
-		log_info "VolumeHandle: $volume_handle_old"
-	fi
 
 	state_set "$context" "$namespace" "$migration_id" "PHASE" "discovered-old"
 	state_set "$context" "$namespace" "$migration_id" "CONTEXT" "$context"
@@ -107,8 +105,6 @@ cmd_discover_old() {
 		-o jsonpath="{range .spec.template.spec.volumes[?(@.persistentVolumeClaim.claimName=='$claim_name')]}{.name}{'\n'}{end}" 2>/dev/null) || true
 
 	if [[ -n "$vol_in_deploy" ]]; then
-		log_info "Found volume in deployment: $vol_in_deploy"
-
 		local mount_old_list=() subpath_old_list=() raw_mount raw_subpath
 		while IFS='|' read -r raw_mount raw_subpath; do
 			local mount_path="${raw_mount#@}"
@@ -121,7 +117,6 @@ cmd_discover_old() {
 		if [[ "$mount_idx" -eq 0 ]]; then
 			log_warn "No volume mounts found for volume $vol_in_deploy"
 		else
-			log_info "Total mounts captured: $mount_idx"
 			state_set_mounts "$context" "$namespace" "$migration_id" "OLD" "$mount_idx" "${mount_old_list[@]}" "${subpath_old_list[@]}"
 		fi
 	else
@@ -131,7 +126,6 @@ cmd_discover_old() {
 		if [[ -n "$fallback_mount" ]]; then
 			local fb_path="${fallback_mount%%|*}"
 			fb_path="${fb_path#@}"
-			log_info "Fallback mount: $fb_path"
 			state_set_mounts "$context" "$namespace" "$migration_id" "OLD" 1 "$fb_path" ""
 		fi
 	fi
@@ -145,38 +139,66 @@ cmd_discover_old() {
 		nfs_path_old="${nfs_share_base}/"
 		[[ -n "$pv_uid" ]] && nfs_path_old="${nfs_share_base}/${pv_uid}/"
 		state_set "$context" "$namespace" "$migration_id" "NFS_PATH_OLD" "$nfs_path_old"
-		log_ok "Old NFS path (PV root): $nfs_host:$nfs_path_old"
 	else
 		log_warn "Could not construct NFS path. Set NFS_PATH_OLD manually."
-		log_info "  nfs_host=$nfs_host"
-		log_info "  nfs_share_base=$nfs_share_base"
-		log_info "  pv_uid=$pv_uid"
 	fi
-
-	log_info "Baseline source manifest will be captured after old writers are quiesced."
 
 	local old_total_bytes=0
 	if [[ -n "$nfs_host" && -n "${nfs_path_old:-}" ]] && ssh_run "$nfs_host" test -d "$nfs_path_old" 2>/dev/null; then
 		old_total_bytes=$(compute_total_size_nfs "$nfs_host" "$nfs_path_old")
 	fi
 	state_set "$context" "$namespace" "$migration_id" "OLD_TOTAL_SIZE" "$old_total_bytes"
-	log_info "Old data size: $(human_size "$old_total_bytes")"
 
-	log_ok "discover-old complete for $migration_id in $context/$namespace"
-	log_info "State file: $(state_file_path "$context" "$namespace" "$migration_id")"
+	local policy_summary
+	case "$reclaim_policy_old" in
+	Delete)
+		policy_summary="Delete (backup required before deploying the new chart)"
+		;;
+	Retain)
+		policy_summary="Retain (backup optional)"
+		;;
+	*)
+		policy_summary="$reclaim_policy_old (backup recommended)"
+		;;
+	esac
+
 	echo ""
-	echo "===== Next steps ====="
-	echo "1. Review the state file and correct any values if needed."
+	local mount_count_old
+	mount_count_old=$(state_get "$context" "$namespace" "$migration_id" "MOUNT_COUNT_OLD" || true)
+	mount_count_old="${mount_count_old:-0}"
+
+	echo "Source discovery:"
+	printf '  Deployment:      %s\n' "$deploy_old"
+	printf '  PVC:             %s\n' "$pvc_old"
+	printf '  PV:              %s\n' "$pv_old"
+	printf '  Reclaim policy:  %s\n' "$policy_summary"
+	printf '  Mounts:          %s\n' "$mount_count_old"
+	if [[ -n "${nfs_path_old:-}" ]]; then
+		printf '  NFS:             %s:%s\n' "$nfs_host" "$nfs_path_old"
+	fi
+	printf '  Data:            %s\n' "$(human_size "$old_total_bytes")"
+	echo ""
+
 	if [[ "$reclaim_policy_old" == "Delete" ]]; then
-		echo "2. REQUIRED: Run: $SCRIPT_NAME backup -c $context -n $namespace -m $migration_id"
-		echo "3. Apply the new chart (4.3.2) to the cluster."
-		echo "4. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
+		log_warn "Create a verified backup before deploying the new chart."
 	elif reclaim_policy_requires_backup "$reclaim_policy_old"; then
-		echo "2. SAFETY: ReclaimPolicy is unknown; run: $SCRIPT_NAME backup -c $context -n $namespace -m $migration_id"
-		echo "3. Apply the new chart (4.3.2) to the cluster."
-		echo "4. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
+		log_warn "Reclaim policy is unknown; create a verified backup before deploying the new chart."
+	fi
+
+	log_ok "Source discovery complete."
+	printf '  State: %s\n' "$(state_file_path "$context" "$namespace" "$migration_id")"
+	echo ""
+	echo "Next:"
+	if [[ "$reclaim_policy_old" == "Delete" ]]; then
+		echo "  1. Run: $SCRIPT_NAME backup -c $context -n $namespace -m $migration_id"
+		echo "  2. Apply the new chart 5.0.0 to the cluster."
+		echo "  3. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
+	elif reclaim_policy_requires_backup "$reclaim_policy_old"; then
+		echo "  1. Run: $SCRIPT_NAME backup -c $context -n $namespace -m $migration_id"
+    echo "  2. Apply the new chart (5.0.0) to the cluster."
+		echo "  3. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
 	else
-		echo "2. Apply the new chart (4.3.2) to the cluster."
-		echo "3. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
+		echo "  1. Apply the new chart (5.0.0) to the cluster."
+		echo "  2. Run: $SCRIPT_NAME discover-new -c $context -n $namespace -m $migration_id"
 	fi
 }

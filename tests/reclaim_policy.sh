@@ -32,12 +32,21 @@ get_volume_mounts_from_deploy() {
 	printf '@/data|\n'
 }
 
+get_pvcs_from_deploy() {
+	printf 'pvc-one\npvc-two\n'
+}
+
 get_pod_for_deploy() {
 	:
 }
 
 ssh() {
 	return 1
+}
+
+confirm() {
+	printf '[?] %s [y/N] y\n' "$1"
+	return 0
 }
 
 assert_contains() {
@@ -71,14 +80,43 @@ run_discover_old() {
 
 	assert_state_value "$state_file" RECLAIM_POLICY_OLD "${policy:-unknown}"
 	assert_contains "$output" "$expected_output"
+	assert_contains "$output" "Deployment old-deployment uses 2 PVCs; migrating only:"
 
 	rm -f "$state_file"
 	rmdir "$state_root/test-context/test-namespace" "$state_root/test-context" "$state_root"
 }
 
-run_discover_old Delete "REQUIRED: Run: pvc-migration.sh backup"
-run_discover_old Retain "backup is optional"
-run_discover_old "" "value: unknown"
+run_discover_old Delete "backup required before deploying"
+run_discover_old Retain "backup optional"
+run_discover_old "" "backup recommended"
+
+state_root=$(mktemp -d)
+STATE_BASE="$state_root"
+pattern_output=$(cmd_discover_old \
+	--context test-context --namespace test-namespace --migration test-migration \
+	--deploy old-deployment --pvc old--15gi-pvc 2>&1)
+assert_contains "$pattern_output" "PVC name includes a size suffix from the legacy 4.3.x naming bug"
+assert_contains "$pattern_output" "Use this PVC as migration source?"
+if [[ "$pattern_output" == *"===="* || "$pattern_output" == *"Verifying deployment"* ]]; then
+	printf 'discover-old warning/output should not contain the legacy verbose banner\n' >&2
+	exit 1
+fi
+state_file="$state_root/test-context/test-namespace/test-migration.env"
+rm -f "$state_file"
+rmdir "$state_root/test-context/test-namespace" "$state_root/test-context" "$state_root"
+
+state_root=$(mktemp -d)
+STATE_BASE="$state_root"
+modern_output=$(cmd_discover_old \
+	--context test-context --namespace test-namespace --migration test-migration \
+	--deploy old-deployment --pvc old--var-www-html-sites-all-pvc 2>&1)
+if [[ "$modern_output" == *"size suffix from the legacy"* || "$modern_output" == *"Use this PVC as migration source?"* ]]; then
+	printf 'discover-old must not flag the current double-dash naming without a size suffix\n' >&2
+	exit 1
+fi
+state_file="$state_root/test-context/test-namespace/test-migration.env"
+rm -f "$state_file"
+rmdir "$state_root/test-context/test-namespace" "$state_root/test-context" "$state_root"
 
 state_root=$(mktemp -d)
 STATE_BASE="$state_root"

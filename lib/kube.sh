@@ -66,6 +66,14 @@ get_pvcs_by_pattern() {
 		grep -i "$pattern" || true
 }
 
+get_pvcs_from_deploy() {
+	local ctx="$1" ns="$2" deploy="$3"
+	kubectl get deployment "$deploy" -n "$ns" --context="$ctx" \
+		-o json 2>/dev/null |
+		jq -r '.spec.template.spec.volumes[]?.persistentVolumeClaim.claimName // empty' 2>/dev/null |
+		sort -u
+}
+
 get_pv_from_pvc() {
 	local ctx="$1" ns="$2" pvc="$3"
 	kubectl get pvc "$pvc" -n "$ns" --context="$ctx" \

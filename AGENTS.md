@@ -75,7 +75,7 @@ Stored at **`$HOME/.pvc-migration/state/<context>/<namespace>/<migration-id>.env
 
 - `discover-old` uses **no auto-discovery** — `--deploy` and `--pvc` are required.
 - `discover-new` falls back to **case-insensitive substring** matching using the migration-id if `--deploy`/`--pvc` are omitted. If ambiguous, it warns and picks the first (uses `head -1`, protected by `|| true`). Filters out old deployment name from state if known.
-- `discover-old` warns if the PVC looks like a 4.3.2 naming pattern (contains `--` and size suffix) — the new chart may already be live.
+- `discover-old` warns if the PVC name contains the size suffix from the legacy 4.3.x naming bug (for example `--...-2gi-pvc`). The current 5.0.0 format may still contain `--`, but no longer includes that size suffix.
 
 ## Guardrails
 
