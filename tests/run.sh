@@ -23,6 +23,7 @@ bash "$ROOT_DIR/tests/verification_manifest.sh"
 bash "$ROOT_DIR/tests/backup_baseline.sh"
 bash "$ROOT_DIR/tests/remote_session.sh"
 bash "$ROOT_DIR/tests/validate.sh"
+bash "$ROOT_DIR/tests/discover_new.sh"
 
 if command -v shellcheck &>/dev/null; then
 	shellcheck --shell=bash \

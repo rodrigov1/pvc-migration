@@ -63,6 +63,7 @@ Usage: $SCRIPT_NAME discover-new -c <context> -n <namespace> -m <migration> \\
 
 Discovers the new resources after the chart is deployed.
 If --deploy/--pvc are omitted, resources are auto-discovered using the migration label.
+Ambiguous auto-discovery fails; use --deploy/--pvc to select the correct resources.
 Explicit --deploy and --pvc are recommended for production migrations.
 EOF
 		;;

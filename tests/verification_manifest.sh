@@ -27,6 +27,7 @@ cp -a "$source_root/$'file\nwith-newline'" "$destination_root/$'file\nwith-newli
 ln -s 'regular file.txt' "$destination_root/link with space"
 touch -h -r "$source_root/link with space" "$destination_root/link with space"
 touch -r "$source_root" "$destination_root"
+touch -r "$source_root/empty directory" "$destination_root/empty directory"
 
 verification_capture_side test-context test-namespace test-migration OLD \
 	local-host "$source_root"

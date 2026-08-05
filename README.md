@@ -90,6 +90,15 @@ old PV and stores it as `RECLAIM_POLICY_OLD` in the migration state:
 does not record a completed backup. It does not block the command, since a
 backup may have been performed externally.
 
+When `--deploy` or `--pvc` are omitted, `discover-new` auto-discovers resources
+using the migration label. If more than one candidate remains after excluding
+the old resource, discovery fails and requires the corresponding explicit
+option; it never selects the first ambiguous match.
+
+The command prints a compact destination summary with the selected resources,
+mount count, NFS path, and whether the destination already exists. Full values
+remain available in the migration state.
+
 ## Baseline verification
 
 `copy-data` uses `baseline-v1` verification after the tar stream completes.

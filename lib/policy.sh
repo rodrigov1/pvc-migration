@@ -39,15 +39,14 @@ reclaim_policy_warn_if_backup_missing() {
 
 	case "$policy" in
 	Delete)
-		log_warn "Old PV has ReclaimPolicy=Delete, but no completed backup is recorded (phase: $phase)."
-		log_warn "If the old PVC is removed, the source data may already be or become unavailable."
-		log_warn "Verify or create the backup before continuing whenever possible."
+		log_warn "Source PV uses ReclaimPolicy=Delete and no completed backup is recorded."
+		log_warn "Verify the source backup before running copy-data."
 		;;
 	Retain)
 		;;
 	*)
-		log_warn "Old PV reclaim policy is unknown, and no completed backup is recorded (phase: $phase)."
-		log_warn "Verify the PV policy and run 'backup' before continuing whenever possible."
+		log_warn "Source ReclaimPolicy is unknown and no completed backup is recorded."
+		log_warn "Treat the source as unsafe until a backup is verified."
 		;;
 	esac
 }

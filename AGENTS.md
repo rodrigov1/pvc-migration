@@ -74,7 +74,7 @@ Stored at **`$HOME/.pvc-migration/state/<context>/<namespace>/<migration-id>.env
 ## Auto-discovery quirks
 
 - `discover-old` uses **no auto-discovery** — `--deploy` and `--pvc` are required.
-- `discover-new` falls back to **case-insensitive substring** matching using the migration-id if `--deploy`/`--pvc` are omitted. If ambiguous, it warns and picks the first (uses `head -1`, protected by `|| true`). Filters out old deployment name from state if known.
+- `discover-new` falls back to **case-insensitive substring** matching using the migration-id if `--deploy`/`--pvc` are omitted. If ambiguous after filtering the old resource, it lists candidates and requires the corresponding explicit option. It filters out the old deployment/PVC from state when possible.
 - `discover-old` warns if the PVC name contains the size suffix from the legacy 4.3.x naming bug (for example `--...-2gi-pvc`). The current 5.0.0 format may still contain `--`, but no longer includes that size suffix.
 
 ## Guardrails
@@ -128,6 +128,6 @@ Stored at **`$HOME/.pvc-migration/state/<context>/<namespace>/<migration-id>.env
 ## Remaining / Cleanup
 
 - `containers[0]` limits support to the first container in multi-container pods.
-- Ambiguous auto-discovery still warns and selects the first match.
+- Ambiguous auto-discovery now fails and requires explicit `--deploy`/`--pvc` selection.
 - `state_set_mounts` does not yet validate indexed count/value consistency.
 - Baseline does not yet compare ACLs, xattrs, SELinux labels, sparse allocation, or hard-link topology.
