@@ -135,6 +135,47 @@ updates — continues if the operator disconnects. Reattach with the session nam
 printed by the command. If the script is already running inside tmux/screen, it
 does not create a nested session.
 
+Session artifacts are stored under:
+
+```text
+$STATE_BASE/sessions/pvc-mig-<subcommand>-<migration-id>.log
+$STATE_BASE/sessions/pvc-mig-<subcommand>-<migration-id>.result
+```
+
+`$STATE_BASE` defaults to `$HOME/.pvc-migration/state`. The result file contains
+one line such as `exit_code=0`. A successful `copy-data` must also leave
+`PHASE=copied` and `VERIFY_STATUS=passed` in the migration state. The tmux pane
+remains available after completion and asks for Enter before closing, so
+`[exited]` is no longer the only indication of the outcome. If the workflow is
+still running after detaching, reattach with:
+
+```bash
+tmux attach -t pvc-mig-copy-data-<migration-id>
+# or:
+screen -r pvc-mig-copy-data-<migration-id>
+```
+
+The generated wrapper preserves `PATH`, `HOME`, `STATE_BASE`, and
+`KUBECONFIG`, avoiding stale tmux-server environments.
+
+## Validation timeouts and diagnostics
+
+`validate` uses a 15-second Kubernetes API request timeout by default, while
+the deployment availability wait remains 120 seconds. Override only the API
+request timeout when needed:
+
+```bash
+PVC_MIGRATION_KUBECTL_REQUEST_TIMEOUT=30s \
+  ./pvc-migration.sh validate -c prod -n app -m myapp-2026-08
+```
+
+If the deployment is not available, `validate` prints pod status, current and
+previous logs, pod description, and recent pod/deployment events. It records
+`PHASE=validation-failed` and exits non-zero if the user cancels or the second
+wait also fails. `validate` does not report success merely because the
+deployment was scaled; the pod must become available and all migrated mounts
+must be accessible.
+
 ## State files
 
 Stored at `$HOME/.pvc-migration/state/<context>/<namespace>/<migration-id>.env`.

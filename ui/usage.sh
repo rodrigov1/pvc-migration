@@ -72,6 +72,8 @@ Usage: $SCRIPT_NAME copy-data -c <context> -n <namespace> -m <migration> [--comp
 Scales BOTH deployments to 0, copies/restores through SSH/tar, and compares
 baseline manifests containing SHA-256 content and POSIX metadata.
 Use --compress for slow links. Review the copy plan before confirming.
+When tmux/screen is used, the session log and exit code are printed when it
+finishes; reattach if you detached before completion.
 EOF
 		;;
 	validate)
@@ -80,7 +82,8 @@ Usage: $SCRIPT_NAME validate -c <context> -n <namespace> -m <migration>
 
 Requires a passed baseline verification, scales the new deployment to 1, and
 checks every migrated mount from the pod,
-and prints a PV cleanup assessment. Restore the desired replica count afterward.
+prints rollout diagnostics if the pod is not available, and prints a PV cleanup
+assessment. Restore the desired replica count afterward.
 EOF
 		;;
 	status)

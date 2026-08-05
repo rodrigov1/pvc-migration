@@ -1,8 +1,11 @@
 # ---- Kubernetes helpers ----
 
 get_deploy_selector() {
-	local ctx="$1" ns="$2" deploy="$3"
-	kubectl get deployment "$deploy" -n "$ns" --context="$ctx" -o json 2>/dev/null |
+	local ctx="$1" ns="$2" deploy="$3" request_timeout="${4:-}" timeout_args=()
+	if [[ -n "$request_timeout" ]]; then
+		timeout_args+=("--request-timeout=$request_timeout")
+	fi
+	kubectl get deployment "$deploy" -n "$ns" --context="$ctx" "${timeout_args[@]}" -o json 2>/dev/null |
 		jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' 2>/dev/null || true
 }
 

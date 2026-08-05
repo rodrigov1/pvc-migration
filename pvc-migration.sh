@@ -48,15 +48,20 @@ main() {
 		usage "$subcommand" 0 || return $?
 		return 0
 	fi
+
+	check_dependencies
+	if [[ ( "$subcommand" == "copy-data" || "$subcommand" == "copy_data" || "$subcommand" == "backup" ) && -t 0 && -t 1 ]]; then
+		if ! persistent_session_preflight "$subcommand" "${@:2}"; then
+			return 1
+		fi
+	fi
 	local session_result=0
 	maybe_run_in_persistent_session "$subcommand" "${@:2}" || session_result=$?
-	if [[ "$session_result" -eq 10 ]]; then
+	if [[ "$session_result" -eq 10 && -z "$PERSISTENT_SESSION_EXIT_CODE" ]]; then
 		return 0
 	elif [[ "$session_result" -ne 0 ]]; then
 		return "$session_result"
 	fi
-
-	check_dependencies
 
 	shift
 

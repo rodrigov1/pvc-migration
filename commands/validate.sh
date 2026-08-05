@@ -1,3 +1,50 @@
+validate_show_rollout_diagnostics() {
+	local context="$1" namespace="$2" deployment="$3" request_timeout="$4"
+	local selector pod_name
+
+	selector=$(get_deploy_selector "$context" "$namespace" "$deployment" "$request_timeout")
+	selector="${selector:-app=$deployment}"
+
+	log_info "Pod status for $deployment:"
+	kubectl get pods -n "$namespace" --context="$context" -l "$selector" \
+		-o wide --request-timeout="$request_timeout" 2>/dev/null ||
+		log_warn "Could not query pod status."
+
+	pod_name=$(kubectl get pods -n "$namespace" --context="$context" -l "$selector" \
+		-o jsonpath='{.items[0].metadata.name}' --request-timeout="$request_timeout" \
+		2>/dev/null || true)
+	if [[ -z "$pod_name" ]]; then
+		log_warn "No pod found for selector $selector."
+	else
+		log_info "Current pod logs for $pod_name (last 50 lines):"
+		kubectl logs "$pod_name" -n "$namespace" --context="$context" \
+			--all-containers=true --tail=50 --request-timeout="$request_timeout" 2>/dev/null ||
+			log_warn "Could not fetch current pod logs."
+
+		log_info "Previous pod logs for $pod_name (last 50 lines):"
+		kubectl logs "$pod_name" -n "$namespace" --context="$context" \
+			--all-containers=true --previous --tail=50 --request-timeout="$request_timeout" 2>/dev/null ||
+			log_warn "Could not fetch previous pod logs."
+
+		log_info "Pod description for $pod_name:"
+		kubectl describe pod "$pod_name" -n "$namespace" --context="$context" \
+			--request-timeout="$request_timeout" 2>/dev/null ||
+			log_warn "Could not describe pod $pod_name."
+
+		log_info "Recent events for pod $pod_name:"
+		kubectl get events -n "$namespace" --context="$context" \
+			--field-selector="involvedObject.kind=Pod,involvedObject.name=$pod_name" \
+			--sort-by=.lastTimestamp --request-timeout="$request_timeout" 2>/dev/null ||
+			log_warn "Could not query pod events."
+	fi
+
+	log_info "Recent events for deployment $deployment:"
+	kubectl get events -n "$namespace" --context="$context" \
+		--field-selector="involvedObject.kind=Deployment,involvedObject.name=$deployment" \
+		--sort-by=.lastTimestamp --request-timeout="$request_timeout" 2>/dev/null ||
+		log_warn "Could not query deployment events."
+}
+
 cmd_validate() {
 	local command="validate"
 	parse_common_args "$command" "$@" || return 1
@@ -5,15 +52,17 @@ cmd_validate() {
 	require_no_command_args "$command" || return 1
 
 	local context="$CLI_CONTEXT" namespace="$CLI_NAMESPACE" migration_id="$CLI_MIGRATION"
+	local request_timeout="${PVC_MIGRATION_KUBECTL_REQUEST_TIMEOUT:-15s}"
 
 	state_require "$context" "$namespace" "$migration_id"
 
 	local verify_status phase
 	verify_status=$(state_get "$context" "$namespace" "$migration_id" "VERIFY_STATUS" || true)
 	phase=$(state_get "$context" "$namespace" "$migration_id" "PHASE" || true)
-	if [[ "$verify_status" != "passed" || "$phase" != "copied" ]]; then
+	if [[ "$verify_status" != "passed" ||
+		( "$phase" != "copied" && "$phase" != "validation-failed" && "$phase" != "validated" ) ]]; then
 		log_error "Migration is not ready for validation (phase: ${phase:-missing}, baseline: ${verify_status:-missing})."
-		log_error "Run copy-data successfully before validate."
+		log_error "Run copy-data successfully before validate, or resolve the previous validation failure."
 		return 1
 	fi
 
@@ -23,42 +72,55 @@ cmd_validate() {
 
 	if [[ -z "$depl_new" ]]; then
 		log_error "No new deployment found in state. Run discover-new first."
-		exit 1
+		return 1
 	fi
 
 	echo ""
 	log_info "Scaling up $depl_new to 1..."
-	kubectl scale deployment "$depl_new" --replicas=1 -n "$namespace" --context="$context"
+	if ! kubectl scale deployment "$depl_new" --replicas=1 -n "$namespace" --context="$context" \
+		--request-timeout="$request_timeout"; then
+		log_error "Could not scale up $depl_new (request timeout: $request_timeout)."
+		state_set "$context" "$namespace" "$migration_id" "PHASE" "validation-failed"
+		return 1
+	fi
 
 	log_info "Waiting for pod to be ready (timeout: 120s)..."
 	if ! kubectl wait deployment "$depl_new" -n "$namespace" --context="$context" \
-		--for=condition=Available --timeout=120s 2>/dev/null; then
+		--for=condition=Available --timeout=120s --request-timeout="$request_timeout" 2>/dev/null; then
 		log_warn "Deployment not available yet. Checking pod status..."
-		kubectl get pods -n "$namespace" --context="$context" | grep "$depl_new" || true
+		validate_show_rollout_diagnostics "$context" "$namespace" "$depl_new" "$request_timeout"
 		if ! confirm "Continue waiting?"; then
-			log_warn "Validation incomplete. Check the pod manually."
-			return
+			state_set "$context" "$namespace" "$migration_id" "PHASE" "validation-failed"
+			log_error "Validation incomplete. Check the pod diagnostics above."
+			return 1
 		fi
-		kubectl wait deployment "$depl_new" -n "$namespace" --context="$context" \
-			--for=condition=Available --timeout=120s 2>/dev/null || true
+		if ! kubectl wait deployment "$depl_new" -n "$namespace" --context="$context" \
+			--for=condition=Available --timeout=120s --request-timeout="$request_timeout" 2>/dev/null; then
+			state_set "$context" "$namespace" "$migration_id" "PHASE" "validation-failed"
+			log_error "Deployment $depl_new did not become available after the second wait."
+			validate_show_rollout_diagnostics "$context" "$namespace" "$depl_new" "$request_timeout"
+			return 1
+		fi
 	fi
 
 	local pod_name selector
-	selector=$(get_deploy_selector "$context" "$namespace" "$depl_new")
+	selector=$(get_deploy_selector "$context" "$namespace" "$depl_new" "$request_timeout")
 	pod_name=$(kubectl get pods -n "$namespace" --context="$context" \
-		-l "${selector:-app=$depl_new}" \
+		-l "${selector:-app=$depl_new}" --request-timeout="$request_timeout" \
 		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 	if [[ -z "$pod_name" ]]; then
 		log_error "Could not find running pod for $depl_new"
-		kubectl get pods -n "$namespace" --context="$context" | grep "$depl_new" || true
-		exit 1
+		validate_show_rollout_diagnostics "$context" "$namespace" "$depl_new" "$request_timeout"
+		state_set "$context" "$namespace" "$migration_id" "PHASE" "validation-failed"
+		return 1
 	fi
 
 	log_ok "Pod $pod_name is running."
 
 	log_info "Recent logs (last 20 lines):"
-	kubectl logs "$pod_name" -n "$namespace" --context="$context" --tail=20 2>/dev/null ||
+	kubectl logs "$pod_name" -n "$namespace" --context="$context" --tail=20 \
+		--request-timeout="$request_timeout" 2>/dev/null ||
 		log_warn "Could not fetch logs (kubelet may be unavailable)."
 
 	state_get_mounts "$context" "$namespace" "$migration_id" "NEW"
@@ -70,7 +132,8 @@ cmd_validate() {
 		echo ""
 		log_info "Checking mount $mnt_idx: $single_mount ..."
 
-		if ! kubectl exec "$pod_name" -n "$namespace" --context="$context" -- \
+		if ! kubectl exec "$pod_name" -n "$namespace" --context="$context" \
+			--request-timeout="$request_timeout" -- \
 			ls -lah "$single_mount" 2>/dev/null; then
 			log_error "kubectl exec failed for $single_mount"
 			log_warn "Check manually: kubectl exec -n $namespace --context=$context $pod_name -- ls -lah $single_mount"
@@ -97,7 +160,8 @@ cmd_validate() {
 
 	local pvc_old_status="NotFound"
 	if [[ -n "$pvc_old_name" ]]; then
-		if kubectl get pvc "$pvc_old_name" -n "$namespace" --context="$context" &>/dev/null; then
+		if kubectl get pvc "$pvc_old_name" -n "$namespace" --context="$context" \
+			--request-timeout="$request_timeout" &>/dev/null; then
 			pvc_old_status="Exists"
 		else
 			pvc_old_status="Deleted (pruned by ArgoCD during sync)"
@@ -106,9 +170,12 @@ cmd_validate() {
 
 	local pv_old_status="" pv_old_reclaim="" pv_old_nfs_info=""
 	if [[ -n "$pv_old_name" ]]; then
-		if kubectl get pv "$pv_old_name" --context="$context" &>/dev/null; then
-			pv_old_status=$(kubectl get pv "$pv_old_name" --context="$context" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
-			pv_old_reclaim=$(kubectl get pv "$pv_old_name" --context="$context" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}' 2>/dev/null || echo "unknown")
+		if kubectl get pv "$pv_old_name" --context="$context" \
+			--request-timeout="$request_timeout" &>/dev/null; then
+			pv_old_status=$(kubectl get pv "$pv_old_name" --context="$context" \
+				--request-timeout="$request_timeout" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
+			pv_old_reclaim=$(kubectl get pv "$pv_old_name" --context="$context" \
+				--request-timeout="$request_timeout" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}' 2>/dev/null || echo "unknown")
 		else
 			pv_old_status="Deleted"
 		fi
@@ -119,8 +186,10 @@ cmd_validate() {
 
 	local new_pvc_size="" new_pvc_status="NotFound"
 	if [[ -n "$pvc_new_name" ]]; then
-		if kubectl get pvc "$pvc_new_name" -n "$namespace" --context="$context" &>/dev/null; then
-			new_pvc_size=$(kubectl get pvc "$pvc_new_name" -n "$namespace" --context="$context" -o jsonpath='{.status.capacity.storage}' 2>/dev/null || echo "unknown")
+		if kubectl get pvc "$pvc_new_name" -n "$namespace" --context="$context" \
+			--request-timeout="$request_timeout" &>/dev/null; then
+			new_pvc_size=$(kubectl get pvc "$pvc_new_name" -n "$namespace" --context="$context" \
+				--request-timeout="$request_timeout" -o jsonpath='{.status.capacity.storage}' 2>/dev/null || echo "unknown")
 			new_pvc_status="Bound"
 		fi
 	fi
