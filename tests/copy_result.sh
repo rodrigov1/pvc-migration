@@ -73,6 +73,9 @@ COPY_PHASE=""
 declare -A MOCK_STATE=()
 MOCK_BAD_HASH=false
 KUBECTL_CALLED=false
+CONFIRM_COUNT=0
+SCALE_COUNT=0
+MOCK_MOUNT_MISMATCH=false
 old_root=$(mktemp -d)
 new_root=$(mktemp -d)
 mock_bin=$(mktemp -d)
@@ -109,7 +112,7 @@ state_require() {
 state_get() {
 	case "$4" in
 	DEPLOY_OLD) printf 'old-deployment\n' ;;
-	DEPLOY_NEW) printf 'new-deployment\n' ;;
+	DEPLOY_NEW) printf 'old-deployment\n' ;;
 	OLD_NFS_HOST) printf 'old-host\n' ;;
 	NFS_PATH_OLD) printf '%s/\n' "$old_root" ;;
 	NEW_NFS_HOST) printf 'new-host\n' ;;
@@ -126,9 +129,15 @@ state_set() {
 }
 
 state_get_mounts() {
-	MOUNT_COUNT=1
-	MOUNTS_LIST=("/data")
-	SUBPATHS_LIST=("")
+	if [[ "$4" == NEW && "$MOCK_MOUNT_MISMATCH" == true ]]; then
+		MOUNT_COUNT=2
+		MOUNTS_LIST=("/data" "/other")
+		SUBPATHS_LIST=("" "")
+	else
+		MOUNT_COUNT=1
+		MOUNTS_LIST=("/data")
+		SUBPATHS_LIST=("")
+	fi
 }
 
 get_deploy_selector() {
@@ -136,6 +145,7 @@ get_deploy_selector() {
 }
 
 confirm() {
+	CONFIRM_COUNT=$((CONFIRM_COUNT + 1))
 	return 0
 }
 
@@ -147,6 +157,9 @@ kubectl() {
 	KUBECTL_CALLED=true
 	case "$1 $2" in
 	get\ deployment|get\ pods|scale\ deployment)
+		if [[ "$1 $2" == "scale deployment" ]]; then
+			SCALE_COUNT=$((SCALE_COUNT + 1))
+		fi
 		return 0
 		;;
 	*)
@@ -177,6 +190,10 @@ if [[ "$COPY_PHASE" != "copied" || ! -f "$new_root/data/file.txt" ]]; then
 	printf 'A successful copy must mark the phase and copy the file\nOutput:\n%s\n' "$copy_output" >&2
 	exit 1
 fi
+if [[ "$CONFIRM_COUNT" != 1 || "$SCALE_COUNT" != 1 ]]; then
+	printf 'Same old/new deployment must use one confirmation and one scale operation\n' >&2
+	exit 1
+fi
 
 rm -f "$new_root/data/file.txt"
 COPY_PHASE=""
@@ -194,6 +211,20 @@ if [[ "$COPY_PHASE" != "copy-failed" ]]; then
 fi
 if [[ "${MOCK_STATE[VERIFY_STATUS]:-}" != failed ]]; then
 	printf 'A failed retry must invalidate a previously passed verification\n' >&2
+	exit 1
+fi
+
+MOCK_BAD_HASH=false
+MOCK_MOUNT_MISMATCH=true
+SCALE_COUNT=0
+CONFIRM_COUNT=0
+if cmd_copy_data --context test-context --namespace test-namespace --migration test-migration \
+	>/dev/null 2>&1; then
+	printf 'Mount mismatches must fail before any copy confirmation or scale operation\n' >&2
+	exit 1
+fi
+if [[ "$SCALE_COUNT" != 0 || "$CONFIRM_COUNT" != 0 ]]; then
+	printf 'Mount mismatch must be rejected before touching workloads\n' >&2
 	exit 1
 fi
 

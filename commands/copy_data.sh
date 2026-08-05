@@ -19,7 +19,6 @@ read_copy_result_code() {
 run_copy_job() {
 	local tmp_script="$1" result_file="$2" copy_failed=false
 
-	log_info "Starting copy (inside the current full-workflow session)..."
 	if ! bash "$tmp_script"; then
 		copy_failed=true
 	fi
@@ -87,158 +86,21 @@ cmd_copy_data() {
 		exit 1
 	fi
 
-	echo ""
-	echo "===== Copy Plan ====="
-	echo "  Old deployment: $depl_old"
-	echo "  New deployment: $depl_new"
-	echo "  Old NFS: $nfs_host_old:$nfs_path_old"
-	echo "  New NFS: $nfs_host_new:$nfs_path_new"
-	echo ""
-
-	local source_available=false
-	log_info "Verifying SSH access to old NFS host: $nfs_host_old ..."
-	if ssh_run "$nfs_host_old" test -d "$nfs_path_old" 2>/dev/null; then
-		source_available=true
-	else
-		log_warn "Old NFS path not accessible: $nfs_host_old:$nfs_path_old"
-		if [[ -n "$backup_base" ]] && ssh_run "$nfs_host_old" test -d "$backup_base" 2>/dev/null; then
-			log_info "But backup dir exists at $backup_base — will restore from backup."
-		else
-			log_warn "Contents of parent directory:"
-			ssh_run "$nfs_host_old" ls -lah "$(dirname "$nfs_path_old")" 2>/dev/null || log_error "Cannot access old NFS at all."
-			if ! confirm "Continue anyway (copy will fail without source or backup)?"; then
-				log_info "Aborted."
-				return
+	local -a workloads=()
+	for deployment in "$depl_old" "$depl_new"; do
+		[[ -n "$deployment" ]] || continue
+		if kubectl get deployment "$deployment" -n "$namespace" --context="$context" &>/dev/null; then
+			if [[ ! " ${workloads[*]} " == *" $deployment "* ]]; then
+				workloads+=("$deployment")
 			fi
 		fi
-	fi
-	if [[ "$reclaim_policy_old" == "Delete" && -n "$backup_base" ]] &&
-		ssh_run "$nfs_host_old" test -d "$backup_base" 2>/dev/null; then
-		log_info "A verified Delete-policy backup is recorded; using it instead of the live source path."
-		source_available=false
-	fi
-	if $source_available; then
-		if ! verification_preflight_remote "$nfs_host_old" "$nfs_path_old"; then
-			log_error "Old NFS host is not ready for baseline verification."
-			return 1
-		fi
-	else
-		if [[ -z "$backup_base" ]] || ! verification_preflight_remote "$nfs_host_old" "$backup_base"; then
-			log_error "Old NFS host is not ready for backup restore verification."
-			return 1
-		fi
-	fi
-
-	log_info "Verifying SSH access to new NFS host: $nfs_host_new ..."
-	if ! ssh_run "$nfs_host_new" test -d "$(dirname "$nfs_path_new")" 2>/dev/null; then
-		log_warn "New NFS parent path not accessible. The share may not exist yet."
-		if ! confirm "Continue anyway?"; then
-			log_info "Aborted."
-			return
-		fi
-	fi
-	if ! verification_preflight_remote "$nfs_host_new" "$(dirname "$nfs_path_new")"; then
-		log_error "New NFS host is not ready for baseline verification."
-		return 1
-	fi
-
-	local new_has_data=false
-	if ssh_bash "$nfs_host_new" 'test -d "$1" && find "$1" -mindepth 1 -maxdepth 1 -printf 1 -quit' "$nfs_path_new" 2>/dev/null | grep -q .; then
-		new_has_data=true
-		log_warn "New NFS path already has data!"
-		ssh_run "$nfs_host_new" ls -lah "$nfs_path_new" 2>/dev/null || true
-		if ! confirm "Replace destination data? Existing entries under each destination mount will be deleted."; then
-			log_info "Aborted."
-			return
-		fi
-	fi
-
-	echo ""
-	log_warn "About to scale DOWN deployments to 0."
-	local old_exists=false
-	local new_exists=false
-	if kubectl get deployment "$depl_old" -n "$namespace" --context="$context" &>/dev/null; then
-		old_exists=true
-		log_warn "  Scale down: $depl_old"
-	else
-		log_warn "  Old deployment '$depl_old' no longer exists (skipping)."
-	fi
-	if kubectl get deployment "$depl_new" -n "$namespace" --context="$context" &>/dev/null; then
-		new_exists=true
-		log_warn "  Scale down: $depl_new"
-	else
-		log_warn "  New deployment '$depl_new' no longer exists (skipping)."
-	fi
-	if ! $old_exists && ! $new_exists; then
-		log_warn "Neither deployment exists. Nothing to scale down."
-	fi
-	if ! confirm "Proceed with scale down?"; then
-		log_info "Aborted."
-		return
-	fi
-	state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "pending"
-	state_set "$context" "$namespace" "$migration_id" "PHASE" "copy-in-progress"
-
-	if $old_exists; then
-		log_info "Scaling down $depl_old ..."
-		if ! kubectl scale deployment "$depl_old" --replicas=0 -n "$namespace" --context="$context" 2>/dev/null; then
-			log_error "Could not scale down $depl_old."
-			return 1
-		fi
-	fi
-	if $new_exists; then
-		log_info "Scaling down $depl_new ..."
-		if ! kubectl scale deployment "$depl_new" --replicas=0 -n "$namespace" --context="$context"; then
-			log_error "Could not scale down $depl_new."
-			return 1
-		fi
-	fi
-
-	if $old_exists && ! wait_for_deployment_pods_zero "$context" "$namespace" "$depl_old" 60; then
-		return 1
-	fi
-	if $new_exists && ! wait_for_deployment_pods_zero "$context" "$namespace" "$depl_new" 60; then
-		return 1
-	fi
-
-	local restore_mode=false
-	if ! $source_available; then
-		if [[ -n "$backup_base" ]] && ssh_run "$nfs_host_old" test -d "$backup_base" 2>/dev/null; then
-			log_info "Will restore from backup at $backup_base"
-			restore_mode=true
-		else
-			log_error "No source NFS path and no backup available at $backup_base"
-			return 1
-		fi
-	fi
-
-	if $source_available; then
-		if ! verification_capture_side "$context" "$namespace" "$migration_id" OLD \
-			"$nfs_host_old" "$nfs_path_old"; then
-			state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
-			return 1
-		fi
-	elif ! verification_side_ready "$context" "$namespace" "$migration_id" OLD; then
-		log_error "Source baseline manifests are missing; run backup before restore."
-		state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
-		return 1
-	fi
-	if $restore_mode; then
-		local current_old_generation
-		current_old_generation=$(state_get "$context" "$namespace" "$migration_id" "VERIFY_OLD_GENERATION" || true)
-		if [[ -z "$backup_generation" || "$current_old_generation" != "$backup_generation" ]]; then
-			log_error "The source baseline generation does not match the selected backup."
-			state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
-			return 1
-		fi
-	fi
+	done
 
 	local mount_old_list=() subpath_old_list=() mount_new_list=() subpath_new_list=()
 	state_get_mounts "$context" "$namespace" "$migration_id" "OLD"
 	mount_old_list=("${MOUNTS_LIST[@]}")
 	subpath_old_list=("${SUBPATHS_LIST[@]}")
 	local mount_count="$MOUNT_COUNT"
-
 	state_get_mounts "$context" "$namespace" "$migration_id" "NEW"
 	mount_new_list=("${MOUNTS_LIST[@]}")
 	subpath_new_list=("${SUBPATHS_LIST[@]}")
@@ -249,62 +111,180 @@ cmd_copy_data() {
 		"${#mount_new_list[@]}" -ne "$mount_count_new" ||
 		"${#subpath_new_list[@]}" -ne "$mount_count_new" ||
 		"$mount_count" -ne "$mount_count_new" ]]; then
-		log_error "Old/new mount counts or mount data do not match; refusing to copy."
-		state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
+		log_error "Mount count differs:"
+		printf '        Source:      %s\n' "$mount_count"
+		printf '        Destination: %s\n' "$mount_count_new"
+		log_error "Run discover-new again after correcting the destination mounts."
 		return 1
 	fi
-	if $restore_mode; then
-		local backup_mount_count
-		backup_mount_count=$(state_get "$context" "$namespace" "$migration_id" "BACKUP_MOUNT_COUNT" || true)
-		if [[ "$backup_mount_count" != "$mount_count" ]]; then
-			log_error "Selected backup mount count does not match the migration state."
-			state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
-			return 1
-		fi
-		if ! verification_check_backup_archives "$context" "$namespace" "$migration_id" \
-			"$nfs_host_old" "$backup_base" "$mount_count"; then
-			state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
+
+	local source_available=false restore_mode=false
+	if ssh_run "$nfs_host_old" test -d "$nfs_path_old" 2>/dev/null; then
+		source_available=true
+	fi
+	if [[ "$reclaim_policy_old" == "Delete" && -n "$backup_base" ]] &&
+		ssh_run "$nfs_host_old" test -d "$backup_base" 2>/dev/null; then
+		source_available=false
+		restore_mode=true
+	fi
+	if ! $source_available && ! $restore_mode; then
+		if [[ -n "$backup_base" ]] && ssh_run "$nfs_host_old" test -d "$backup_base" 2>/dev/null; then
+			restore_mode=true
+		else
+			log_error "Source NFS path is unavailable and no verified backup was found."
 			return 1
 		fi
 	fi
 
+	if $source_available; then
+		if ! verification_preflight_remote "$nfs_host_old" "$nfs_path_old"; then
+			log_error "Old NFS host is not ready for baseline verification."
+			return 1
+		fi
+	else
+		if ! verification_preflight_remote "$nfs_host_old" "$backup_base"; then
+			log_error "Old NFS host is not ready for backup restore verification."
+			return 1
+		fi
+	fi
+
+	if ! ssh_run "$nfs_host_new" test -d "$(dirname "$nfs_path_new")" 2>/dev/null; then
+		log_error "Cannot access destination NFS parent:"
+		printf '        %s:%s\n' "$nfs_host_new" "$(dirname "$nfs_path_new")"
+		return 1
+	fi
+	if ! verification_preflight_remote "$nfs_host_new" "$(dirname "$nfs_path_new")"; then
+		log_error "New NFS host is not ready for baseline verification."
+		return 1
+	fi
+
+	local new_has_data=false new_total_bytes=0 destination_status="not created yet"
+	if ssh_run "$nfs_host_new" test -d "$nfs_path_new" 2>/dev/null; then
+		if ssh_bash "$nfs_host_new" 'find "$1" -mindepth 1 -maxdepth 1 -printf 1 -quit' "$nfs_path_new" 2>/dev/null | grep -q .; then
+			new_has_data=true
+			new_total_bytes=$(compute_total_size_nfs "$nfs_host_new" "$nfs_path_new")
+			destination_status="contains data ($(human_size "$new_total_bytes"))"
+		else
+			destination_status="empty"
+		fi
+	fi
+
+	if $restore_mode; then
+		local current_old_generation backup_mount_count
+		current_old_generation=$(state_get "$context" "$namespace" "$migration_id" "VERIFY_OLD_GENERATION" || true)
+		if [[ -z "$backup_generation" || "$current_old_generation" != "$backup_generation" ]]; then
+			log_error "The source baseline generation does not match the selected backup."
+			return 1
+		fi
+		backup_mount_count=$(state_get "$context" "$namespace" "$migration_id" "BACKUP_MOUNT_COUNT" || true)
+		if [[ "$backup_mount_count" != "$mount_count" ]]; then
+			log_error "Selected backup mount count does not match the migration state."
+			return 1
+		fi
+		if ! verification_check_backup_archives "$context" "$namespace" "$migration_id" \
+			"$nfs_host_old" "$backup_base" "$mount_count"; then
+			return 1
+		fi
+		log_info "Backup metadata and archives verified."
+	fi
+
+	local old_total_bytes source_summary mode_summary compression_summary
+	old_total_bytes=$(state_get "$context" "$namespace" "$migration_id" "OLD_TOTAL_SIZE" || true)
+	old_total_bytes="${old_total_bytes:-0}"
+	if $restore_mode; then
+		source_summary="verified backup: $nfs_host_old:$backup_base"
+		mode_summary="backup restore"
+	else
+		source_summary="$nfs_host_old:$nfs_path_old"
+		mode_summary="live source"
+	fi
+	if [[ "$use_compress" == true ]]; then
+		compression_summary="enabled"
+	else
+		compression_summary="disabled"
+	fi
+
 	echo ""
-	log_info "Copy plan: $mount_count mount(s)"
+	echo "Copy summary:"
+	printf '  Source:       %s\n' "$source_summary"
+	printf '  Destination:  %s:%s\n' "$nfs_host_new" "$nfs_path_new"
+	if [[ "${#workloads[@]}" -gt 0 ]]; then
+		printf '  Workloads:    %s\n' "${workloads[*]}"
+	else
+		printf '  Workloads:    none found\n'
+	fi
+	printf '  Mounts:       %s\n' "$mount_count"
+	printf '  Data:         %s\n' "$(human_size "$old_total_bytes")"
+	printf '  Mode:         %s\n' "$mode_summary"
+	printf '  Compression:  %s\n' "$compression_summary"
+	printf '  Destination:  %s\n' "$destination_status"
+
+	echo ""
+	log_info "Preflight checks passed."
+	if [[ "${#workloads[@]}" -gt 0 ]]; then
+		log_warn "Workload(s) ${workloads[*]} will be scaled to 0."
+	else
+		log_warn "No workloads found; nothing will be scaled down."
+	fi
+	if $new_has_data; then
+		log_warn "Existing destination data will be replaced."
+	fi
+	if ! confirm "Stop workloads and start the copy?"; then
+		log_info "Aborted. No workloads were modified."
+		return
+	fi
+
+	log_info "Preparing destination directories..."
 	for ((i = 0; i < mount_count; i++)); do
-		local os="${subpath_old_list[$i]}"
 		local ns="${subpath_new_list[$i]}"
-		local src="${nfs_path_old}${os:+${os}/}"
 		local dst="${nfs_path_new}${ns:+${ns}/}"
-		echo "  [$((i+1))] ${mount_old_list[$i]:-<root>}"
-		echo "       Old: $nfs_host_old:$src"
-		echo "       New: $nfs_host_new:$dst"
+		ssh_run "$nfs_host_new" mkdir -p "$dst" 2>/dev/null || {
+			log_error "Failed to create destination directory: $dst"
+			return 1
+		}
 	done
+	log_ok "Destination directories ready."
+
+	state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "pending"
+	state_set "$context" "$namespace" "$migration_id" "PHASE" "copy-in-progress"
+
+	local workflow_start_time
+	workflow_start_time=$(date +%s)
+	for deployment in "${workloads[@]}"; do
+		if ! kubectl scale deployment "$deployment" --replicas=0 -n "$namespace" --context="$context" 2>/dev/null; then
+			log_error "Could not scale down $deployment."
+			return 1
+		fi
+	done
+	for deployment in "${workloads[@]}"; do
+		if ! wait_for_deployment_pods_zero "$context" "$namespace" "$deployment" 60 "" true; then
+			return 1
+		fi
+	done
+	if [[ "${#workloads[@]}" -gt 0 ]]; then
+		log_ok "Workloads stopped."
+	fi
+
+	if $source_available; then
+		log_info "Capturing source baseline ($mount_count mount(s))..."
+		if ! verification_capture_side "$context" "$namespace" "$migration_id" OLD \
+			"$nfs_host_old" "$nfs_path_old" true; then
+			state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
+			return 1
+		fi
+		log_ok "Source baseline captured."
+	elif ! verification_side_ready "$context" "$namespace" "$migration_id" OLD; then
+		log_error "Source baseline manifests are missing; run backup before restore."
+		state_set "$context" "$namespace" "$migration_id" "VERIFY_STATUS" "failed"
+		return 1
+	fi
 
 	local progress_cmd="cat"
 	if command -v pv &>/dev/null; then
 		progress_cmd="pv -trab"
 	fi
-
-	log_info "Creating destination directories..."
-	for ((i = 0; i < mount_count; i++)); do
-		local ns="${subpath_new_list[$i]}"
-		local dst="${nfs_path_new}${ns:+${ns}/}"
-		ssh_run "$nfs_host_new" mkdir -p "$dst" 2>/dev/null || {
-			log_error "Failed to create directory: $dst"
-			exit 1
-		}
-	done
-
-	local confirm_msg="Proceed with data copy?"
-	if $restore_mode; then
-		confirm_msg="Proceed with data restore from backup?"
-	fi
-	if ! confirm "$confirm_msg"; then
-		log_info "Aborted."
-		return
-	fi
 	if $new_has_data; then
-		log_warn "Removing existing entries from destination mount paths..."
+		log_info "Clearing existing destination data..."
 		for ((i = 0; i < mount_count; i++)); do
 			local clean_subpath="${subpath_new_list[$i]}"
 			local clean_dst="${nfs_path_new}${clean_subpath:+${clean_subpath}/}"
@@ -340,20 +320,19 @@ cmd_copy_data() {
 		echo ''
 		echo "subpath_old_list=($(for v in "${subpath_old_list[@]}"; do printf '%q ' "$v"; done))"
 		echo "subpath_new_list=($(for v in "${subpath_new_list[@]}"; do printf '%q ' "$v"; done))"
+		echo "mount_labels=($(for v in "${mount_old_list[@]}"; do printf '%q ' "$v"; done))"
 		echo ''
 		echo 'for ((i = 0; i < mount_count; i++)); do'
 		echo '  old_sub="${subpath_old_list[$i]}"'
 		echo '  new_sub="${subpath_new_list[$i]}"'
 		echo '  src="${nfs_path_old}${old_sub:+${old_sub}/}"'
 		echo '  dst="${nfs_path_new}${new_sub:+${new_sub}/}"'
-		echo '  echo ""'
+		echo '  mount_label="${mount_labels[$i]:-<root>}"'
 		if $restore_mode; then
-			echo '  echo "[Mount $((i+1))/$mount_count] Restoring from backup ..."'
-			echo '  echo "  backup:${backup_base}/${i}.tgz -> $dst"'
+			echo '  printf "[%d/%d] Restoring %s...\n" "$((i+1))" "$mount_count" "$mount_label"'
 			echo '  if ! ssh_run "$nfs_host_old" cat -- "${backup_base}/${i}.tgz" | eval "$progress_cmd" | ssh_bash "$nfs_host_new" '\''exec tar --numeric-owner --same-owner --same-permissions --sparse --gzip -xpf - --directory="$1"'\'' "$dst"; then'
 		else
-			echo '  echo "[Mount $((i+1))/$mount_count] Copying ..."'
-			echo '  echo "  $src -> $dst"'
+			echo '  printf "[%d/%d] Copying %s...\n" "$((i+1))" "$mount_count" "$mount_label"'
 			if $use_compress; then
 				echo '  if ! ssh_bash "$nfs_host_old" '\''exec tar --format=pax --numeric-owner --sparse --gzip -cpf - --directory="$1" .'\'' "$src" | eval "$progress_cmd" | ssh_bash "$nfs_host_new" '\''exec tar --numeric-owner --same-owner --same-permissions --sparse --gzip -xpf - --directory="$1"'\'' "$dst"; then'
 			else
@@ -363,29 +342,28 @@ cmd_copy_data() {
 		echo '    echo "[ERROR] Copy failed for mount $((i+1))"'
 		echo '    exit 1'
 		echo '  fi'
-		echo '  echo "[Mount $((i+1))/$mount_count] Complete."'
 		echo 'done'
-		echo ''
-		echo 'echo "Data stream transfer completed at $(date -Iseconds)"'
 	} > "$tmp_script"
 	chmod +x "$tmp_script"
 
-	local start_time end_time elapsed
-	start_time=$(date +%s)
 	local copy_failed=false
 	if ! run_copy_job "$tmp_script" "$result_file"; then
 		copy_failed=true
 	fi
 	if ! $copy_failed; then
+		log_info "Verifying destination ($mount_count mount(s))..."
 		if ! verification_capture_side "$context" "$namespace" "$migration_id" NEW \
-			"$nfs_host_new" "$nfs_path_new" ||
+			"$nfs_host_new" "$nfs_path_new" true ||
 			! verification_compare_sides "$context" "$namespace" "$migration_id"; then
 			copy_failed=true
+		else
+			log_ok "Content and metadata verification passed."
 		fi
 	fi
 
+	local end_time elapsed
 	end_time=$(date +%s)
-	elapsed=$((end_time - start_time))
+	elapsed=$((end_time - workflow_start_time))
 	rm -f "$tmp_script" "$result_file"
 
 	if $copy_failed; then
@@ -396,14 +374,12 @@ cmd_copy_data() {
 		return 1
 	fi
 
-	log_ok "Data copy completed in ${elapsed}s"
-
 	state_set "$context" "$namespace" "$migration_id" "PHASE" "copied"
 	state_set "$context" "$namespace" "$migration_id" "COPY_TIMESTAMP" "$(date -Iseconds)"
 
 	echo ""
-	log_ok "copy-data complete for $migration_id in $context/$namespace"
+	log_ok "Copy completed successfully (${elapsed}s)."
 	echo ""
-	echo "===== Next steps ====="
-	echo "1. Run: $SCRIPT_NAME validate -c $context -n $namespace -m $migration_id"
+	echo "Next:"
+	echo "  Run: $SCRIPT_NAME validate -c $context -n $namespace -m $migration_id"
 }

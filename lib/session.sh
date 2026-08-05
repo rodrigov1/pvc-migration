@@ -89,25 +89,26 @@ write_persistent_session_wrapper() {
 		printf 'session_name=%q\n' "$PERSISTENT_SESSION_NAME"
 		printf 'log_file=%q\n' "$PERSISTENT_SESSION_LOG"
 		printf 'result_file=%q\n' "$PERSISTENT_SESSION_RESULT"
-		printf 'exec > >(tee -a "$log_file") 2>&1\n'
-		printf 'printf "[INFO] Persistent workflow started at %%s\\n" "$(date -Iseconds)"\n'
 		printf 'command=(env PVC_MIGRATION_SESSION=1 %q %q' "$SCRIPT_DIR/pvc-migration.sh" "$subcommand"
 		for argument in "$@"; do
 			printf ' %q' "$argument"
-		done
+			done
 		printf ')\n'
-		printf '"${command[@]}"\n'
-		printf 'status=$?\n'
+		printf '{\n'
+		printf '  printf "[INFO] Persistent workflow started at %%s\\n" "$(date -Iseconds)"\n'
+		printf '  "${command[@]}"\n'
+		printf '} 2>&1 | tee -a "$log_file"\n'
+		printf 'status="${PIPESTATUS[0]}"\n'
 		printf 'result_tmp="${result_file}.$$"\n'
 		printf 'printf "exit_code=%%s\\n" "$status" >"$result_tmp" && mv -f -- "$result_tmp" "$result_file"\n'
 		printf 'if [[ "$status" -eq 0 ]]; then\n'
-		printf '  printf "[OK] Persistent workflow completed successfully (exit code 0).\\n"\n'
+		printf '  printf "[OK] Persistent workflow completed successfully (exit code 0).\\n" | tee -a "$log_file"\n'
 		printf 'else\n'
-		printf '  printf "[ERROR] Persistent workflow failed (exit code %%s).\\n" "$status"\n'
+		printf '  printf "[ERROR] Persistent workflow failed (exit code %%s).\\n" "$status" | tee -a "$log_file"\n'
 		printf 'fi\n'
-		printf 'printf "[INFO] Session log: %%s\\n" "$log_file"\n'
-		printf 'printf "[INFO] Result file: %%s\\n" "$result_file"\n'
-		printf 'printf "[INFO] Press Enter to close this session, or detach and reattach later.\\n"\n'
+		printf 'printf "[INFO] Session log: %%s\\n" "$log_file" | tee -a "$log_file"\n'
+		printf 'printf "[INFO] Result file: %%s\\n" "$result_file" | tee -a "$log_file"\n'
+		printf 'printf "[INFO] Press Enter to close this session, or detach and reattach later.\\n" | tee -a "$log_file"\n'
 		printf 'IFS= read -r _ || true\n'
 		printf 'exit "$status"\n'
 	} >"$PERSISTENT_SESSION_WRAPPER" || write_status=$?

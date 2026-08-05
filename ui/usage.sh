@@ -73,7 +73,9 @@ Usage: $SCRIPT_NAME copy-data -c <context> -n <namespace> -m <migration> [--comp
 
 Scales BOTH deployments to 0, copies/restores through SSH/tar, and compares
 baseline manifests containing SHA-256 content and POSIX metadata.
-Use --compress for slow links. Review the copy plan before confirming.
+Runs all preflight checks before the single destructive confirmation, then
+stops workloads, transfers data, and verifies content and POSIX metadata.
+Use --compress for slow links.
 When tmux/screen is used, the session log and exit code are printed when it
 finishes; reattach if you detached before completion.
 EOF

@@ -10,7 +10,7 @@ get_deploy_selector() {
 }
 
 wait_for_deployment_pods_zero() {
-	local ctx="$1" ns="$2" deploy="$3" timeout_seconds="${4:-60}" selector="${5:-}"
+	local ctx="$1" ns="$2" deploy="$3" timeout_seconds="${4:-60}" selector="${5:-}" quiet="${6:-false}"
 
 	if [[ -z "$selector" ]]; then
 		selector=$(get_deploy_selector "$ctx" "$ns" "$deploy")
@@ -27,7 +27,9 @@ wait_for_deployment_pods_zero() {
 			return 1
 		fi
 		if [[ -z "$pod_list" ]]; then
-			log_ok "All pods for $deploy terminated."
+			if ! $quiet; then
+				log_ok "All pods for $deploy terminated."
+			fi
 			return 0
 		fi
 		if ((SECONDS >= deadline)); then

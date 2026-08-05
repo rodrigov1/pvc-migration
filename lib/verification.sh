@@ -204,7 +204,7 @@ verification_capture_mount() {
 
 verification_capture_side() {
 	local context="$1" namespace="$2" migration_id="$3" side="$4"
-	local nfs_host="$5" nfs_root="$6"
+	local nfs_host="$5" nfs_root="$6" quiet="${7:-false}"
 	local mount_count mount_idx subpath root verify_dir staging_dir generation generation_dir
 	local -a subpaths=()
 
@@ -224,7 +224,9 @@ verification_capture_side() {
 	for ((mount_idx = 0; mount_idx < mount_count; mount_idx++)); do
 		subpath="${subpaths[$mount_idx]}"
 		root="${nfs_root}${subpath:+${subpath}/}"
-		log_info "Capturing $side baseline manifest for mount $((mount_idx + 1))..."
+		if ! $quiet; then
+			log_info "Capturing $side baseline manifest for mount $((mount_idx + 1))..."
+		fi
 		if ! verification_capture_mount_to_dir "$nfs_host" "$root" \
 			"$((mount_idx + 1))" "$staging_dir"; then
 			log_error "Could not capture $side baseline manifest for mount $((mount_idx + 1))."
